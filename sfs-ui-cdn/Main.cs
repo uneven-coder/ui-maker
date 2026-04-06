@@ -888,7 +888,20 @@ namespace cdnui
             _windowRects.Clear();
         }
 
-        private void CreateNodeRecursive(JObject node, Transform parent, string parentId, string parentPath, int siblingIndex, int siblingCount)
+        private readonly struct ChildAxisAllocation
+        {
+            public ChildAxisAllocation(int? width, int? height)
+            {
+                Width = width;
+                Height = height;
+            }
+
+            public int? Width { get; }
+
+            public int? Height { get; }
+        }
+
+        private void CreateNodeRecursive(JObject node, Transform parent, string parentId, string parentPath, int siblingIndex, int siblingCount, int? allocatedWidth = null, int? allocatedHeight = null)
         {
             // Render one node and recurse with layout-group-based positioning rules.
 
@@ -929,8 +942,8 @@ namespace cdnui
                 : GetOptionalBool(node, "background_color_override", false);
             var borderColor = GetOptionalString(node, "border_color", string.Empty);
             var children = node["children"] as JArray ?? throw new InvalidOperationException($"Node {id} is missing children array.");
-            var resolvedWidth = ResolveNodeAxisSize(parent, type, isWidthAxis: true, widthMode, width, siblingCount);
-            var resolvedHeight = ResolveNodeAxisSize(parent, type, isWidthAxis: false, heightMode, height, siblingCount);
+            var resolvedWidth = allocatedWidth ?? ResolveNodeAxisSize(parent, type, isWidthAxis: true, widthMode, width, siblingCount);
+            var resolvedHeight = allocatedHeight ?? ResolveNodeAxisSize(parent, type, isWidthAxis: false, heightMode, height, siblingCount);
 
             Transform childParent;
             Transform renderedElement;
@@ -1064,16 +1077,98 @@ namespace cdnui
                 TextAlignment = textAlignment,
             };
 
+            var childAllocations = ResolveChildAxisAllocations(children, resolvedWidth, resolvedHeight, layoutDirection, spacing, paddingLeft, paddingRight, paddingTop, paddingBottom);
             var childNameCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             var childSiblingCount = children.Count;
-            foreach (var childToken in children)
+            for (var childListIndex = 0; childListIndex < childSiblingCount; childListIndex++)
             {
+                var childToken = children[childListIndex];
                 var childNode = childToken as JObject ?? throw new InvalidOperationException($"Node {id} contains non-object child entry.");
                 var childName = SanitizePathSegment(GetRequiredString(childNode, "name"));
                 var childIndex = childNameCounts.TryGetValue(childName, out var existingChildIndex) ? existingChildIndex : 0;
                 childNameCounts[childName] = childIndex + 1;
-                CreateNodeRecursive(childNode, childParent, parentId: id, parentPath: pathKey, siblingIndex: childIndex, siblingCount: childSiblingCount);
+                var allocation = childAllocations[childListIndex];
+                CreateNodeRecursive(childNode, childParent, parentId: id, parentPath: pathKey, siblingIndex: childIndex, siblingCount: childSiblingCount, allocatedWidth: allocation.Width, allocatedHeight: allocation.Height);
             }
+        }
+
+        private static List<ChildAxisAllocation> ResolveChildAxisAllocations(JArray children, int parentWidth, int parentHeight, string layoutDirection, int spacing, int paddingLeft, int paddingRight, int paddingTop, int paddingBottom)
+        {
+            // Allocate child axis sizes using fixed-reserve then auto-share behavior.
+
+            var allocations = new List<ChildAxisAllocation>(children.Count);
+            if (children.Count == 0)
+                return allocations;
+
+            var innerWidth = Mathf.Max(1, parentWidth - paddingLeft - paddingRight);
+            var innerHeight = Mathf.Max(1, parentHeight - paddingTop - paddingBottom);
+            var spacingTotal = Mathf.Max(0, children.Count - 1) * Mathf.Max(0, spacing);
+            var horizontal = string.Equals(layoutDirection, "Horizontal", StringComparison.OrdinalIgnoreCase);
+
+            if (horizontal)
+            {
+                var primaryAvailable = Mathf.Max(1, innerWidth - spacingTotal);
+                var manualTotal = 0;
+                var autoCount = 0;
+                for (var i = 0; i < children.Count; i++)
+                {
+                    var child = children[i] as JObject ?? throw new InvalidOperationException("Child entry must be an object.");
+                    var childWidthMode = NormalizeSizeMode(GetOptionalString(child, "width_mode", LegacySizeModeFromFullFlag(GetOptionalBool(child, "full_width", true))), "width");
+                    if (string.Equals(childWidthMode, "Auto", StringComparison.Ordinal))
+                    {
+                        autoCount += 1;
+                        continue;
+                    }
+
+                    var manualWidth = Mathf.Clamp(GetRequiredInt(child, "width"), 1, 50000);
+                    manualTotal += manualWidth;
+                }
+
+                var remaining = Mathf.Max(1, primaryAvailable - manualTotal);
+                var autoPrimary = autoCount > 0 ? Mathf.Max(1, remaining / autoCount) : 0;
+                for (var i = 0; i < children.Count; i++)
+                {
+                    var child = children[i] as JObject ?? throw new InvalidOperationException("Child entry must be an object.");
+                    var childWidthMode = NormalizeSizeMode(GetOptionalString(child, "width_mode", LegacySizeModeFromFullFlag(GetOptionalBool(child, "full_width", true))), "width");
+                    var childHeightMode = NormalizeSizeMode(GetOptionalString(child, "height_mode", LegacySizeModeFromFullFlag(GetOptionalBool(child, "full_height", false))), "height");
+                    allocations.Add(new ChildAxisAllocation(
+                        width: string.Equals(childWidthMode, "Auto", StringComparison.Ordinal) ? autoPrimary : null,
+                        height: string.Equals(childHeightMode, "Auto", StringComparison.Ordinal) ? innerHeight : null));
+                }
+
+                return allocations;
+            }
+
+            var primaryHeightAvailable = Mathf.Max(1, innerHeight - spacingTotal);
+            var manualHeightTotal = 0;
+            var autoHeightCount = 0;
+            for (var i = 0; i < children.Count; i++)
+            {
+                var child = children[i] as JObject ?? throw new InvalidOperationException("Child entry must be an object.");
+                var childHeightMode = NormalizeSizeMode(GetOptionalString(child, "height_mode", LegacySizeModeFromFullFlag(GetOptionalBool(child, "full_height", false))), "height");
+                if (string.Equals(childHeightMode, "Auto", StringComparison.Ordinal))
+                {
+                    autoHeightCount += 1;
+                    continue;
+                }
+
+                var manualHeight = Mathf.Clamp(GetRequiredInt(child, "height"), 1, 50000);
+                manualHeightTotal += manualHeight;
+            }
+
+            var remainingHeight = Mathf.Max(1, primaryHeightAvailable - manualHeightTotal);
+            var autoHeight = autoHeightCount > 0 ? Mathf.Max(1, remainingHeight / autoHeightCount) : 0;
+            for (var i = 0; i < children.Count; i++)
+            {
+                var child = children[i] as JObject ?? throw new InvalidOperationException("Child entry must be an object.");
+                var childWidthMode = NormalizeSizeMode(GetOptionalString(child, "width_mode", LegacySizeModeFromFullFlag(GetOptionalBool(child, "full_width", true))), "width");
+                var childHeightMode = NormalizeSizeMode(GetOptionalString(child, "height_mode", LegacySizeModeFromFullFlag(GetOptionalBool(child, "full_height", false))), "height");
+                allocations.Add(new ChildAxisAllocation(
+                    width: string.Equals(childWidthMode, "Auto", StringComparison.Ordinal) ? innerWidth : null,
+                    height: string.Equals(childHeightMode, "Auto", StringComparison.Ordinal) ? autoHeight : null));
+            }
+
+            return allocations;
         }
 
         private static string SanitizePathSegment(string value)

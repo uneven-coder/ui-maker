@@ -110,7 +110,7 @@ def default_props_for_type(element_type: str) -> dict[str, object]:
 class UIDocument:
     # Store hierarchy, layer order, and editable properties for the creator.
 
-    CONTAINER_TYPES = {"Window", "Container", "Box"}
+    CONTAINER_TYPES = {"Window", "ClosableWindow", "Container", "Box"}
 
     def __init__(self):
         self.elements: dict[str, UIElement] = {}
@@ -1114,7 +1114,7 @@ class DesignerCanvas(wx.Panel):
                 continue
 
             node = self._document.elements.get(node_id)
-            if node is not None and node.element_type == "Window":
+            if node is not None and node.element_type in {"Window", "ClosableWindow"}:
                 continue
 
             rel_x, rel_y, rel_w, rel_h = metrics
@@ -1196,7 +1196,7 @@ class DesignerCanvas(wx.Panel):
         width = node.width if node.width_mode == SIZE_MODE_MANUAL else available_width
         width = max(20, width)
         rect = wx.Rect(x, y, width, node.height)
-        if node.element_type != "Window":
+        if node.element_type not in {"Window", "ClosableWindow"}:
             self._last_layout_rects.append((node_id, rect))
             base_color = self.COLORS.get(node.element_type, wx.Colour(100, 100, 100))
             color = self._overlay_variant_color(base_color, order_map.get(node_id, 0), depth_map.get(node_id, 0))
@@ -1378,11 +1378,11 @@ class OrchestratorPanel(wx.Panel):
 class DesignerPanel(wx.Panel):
     # Provide layered creator workspace plus realtime bridge visualizer controls.
 
-    ELEMENT_TYPES = ["Window", "Container", "Box", "Label", "Button", "TextInput", "Toggle", "Slider", "Separator", "Space"]
-    CONTAINER_TYPES = {"Window", "Container", "Box"}
-    TEXT_TYPES = {"Window", "Label", "Button", "TextInput", "Toggle"}
-    TEXT_COLOR_OVERRIDE_SUPPORTED_TYPES = {"Window", "Label", "Button"}
-    BACKGROUND_COLOR_OVERRIDE_SUPPORTED_TYPES = {"Window", "Box", "TextInput"}
+    ELEMENT_TYPES = ["Window", "ClosableWindow", "Container", "Box", "Label", "Button", "TextInput", "Toggle", "Slider", "Separator", "Space"]
+    CONTAINER_TYPES = {"Window", "ClosableWindow", "Container", "Box"}
+    TEXT_TYPES = {"Window", "ClosableWindow", "Label", "Button", "TextInput", "Toggle"}
+    TEXT_COLOR_OVERRIDE_SUPPORTED_TYPES = {"Window", "ClosableWindow", "Label", "Button"}
+    BACKGROUND_COLOR_OVERRIDE_SUPPORTED_TYPES = {"Window", "ClosableWindow", "Box", "TextInput"}
     ALIGNMENT_CHOICES = [
         "UpperLeft",
         "UpperCenter",
@@ -1428,6 +1428,7 @@ class DesignerPanel(wx.Panel):
         self._generated_test_restart_attempted = False
         self._pending_generated_retry_source: Optional[str] = None
         self._latest_layout_payload: Optional[dict] = None
+        self._snapshot_sync_delay_ms = 120
         self._build_ui()
         self._refresh_project_status()
         self._set_creator_enabled(False)
@@ -1525,10 +1526,21 @@ class DesignerPanel(wx.Panel):
         self.field_child_alignment = wx.Choice(properties_panel, choices=self.ALIGNMENT_CHOICES)
         self.field_child_alignment.SetSelection(0)
         self.field_spacing = wx.SpinCtrl(properties_panel, min=SAFE_MIN_SPACING, max=SAFE_MAX_SPACING, initial=12)
-        self.field_padding_left = wx.SpinCtrl(properties_panel, min=SAFE_MIN_PADDING, max=SAFE_MAX_PADDING, initial=12)
-        self.field_padding_right = wx.SpinCtrl(properties_panel, min=SAFE_MIN_PADDING, max=SAFE_MAX_PADDING, initial=12)
-        self.field_padding_top = wx.SpinCtrl(properties_panel, min=SAFE_MIN_PADDING, max=SAFE_MAX_PADDING, initial=12)
-        self.field_padding_bottom = wx.SpinCtrl(properties_panel, min=SAFE_MIN_PADDING, max=SAFE_MAX_PADDING, initial=12)
+        self.padding_row_panel = wx.Panel(properties_panel)
+        self.field_padding_left = wx.SpinCtrl(self.padding_row_panel, min=SAFE_MIN_PADDING, max=SAFE_MAX_PADDING, initial=12)
+        self.field_padding_right = wx.SpinCtrl(self.padding_row_panel, min=SAFE_MIN_PADDING, max=SAFE_MAX_PADDING, initial=12)
+        self.field_padding_top = wx.SpinCtrl(self.padding_row_panel, min=SAFE_MIN_PADDING, max=SAFE_MAX_PADDING, initial=12)
+        self.field_padding_bottom = wx.SpinCtrl(self.padding_row_panel, min=SAFE_MIN_PADDING, max=SAFE_MAX_PADDING, initial=12)
+        padding_row_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        padding_row_sizer.Add(wx.StaticText(self.padding_row_panel, label="L"), 0, wx.RIGHT | wx.ALIGN_CENTER_VERTICAL, 3)
+        padding_row_sizer.Add(self.field_padding_left, 0, wx.RIGHT | wx.ALIGN_CENTER_VERTICAL, 8)
+        padding_row_sizer.Add(wx.StaticText(self.padding_row_panel, label="R"), 0, wx.RIGHT | wx.ALIGN_CENTER_VERTICAL, 3)
+        padding_row_sizer.Add(self.field_padding_right, 0, wx.RIGHT | wx.ALIGN_CENTER_VERTICAL, 8)
+        padding_row_sizer.Add(wx.StaticText(self.padding_row_panel, label="T"), 0, wx.RIGHT | wx.ALIGN_CENTER_VERTICAL, 3)
+        padding_row_sizer.Add(self.field_padding_top, 0, wx.RIGHT | wx.ALIGN_CENTER_VERTICAL, 8)
+        padding_row_sizer.Add(wx.StaticText(self.padding_row_panel, label="B"), 0, wx.RIGHT | wx.ALIGN_CENTER_VERTICAL, 3)
+        padding_row_sizer.Add(self.field_padding_bottom, 0, wx.ALIGN_CENTER_VERTICAL, 0)
+        self.padding_row_panel.SetSizer(padding_row_sizer)
         self.field_width_mode = wx.Choice(properties_panel, choices=SIZE_MODE_CHOICES)
         self.field_width_mode.SetSelection(0)
         self.field_height_mode = wx.Choice(properties_panel, choices=SIZE_MODE_CHOICES)
@@ -1553,10 +1565,7 @@ class DesignerPanel(wx.Panel):
         self._add_general_row(properties_panel, properties_sizer, "layout", "Layout Direction", self.field_layout)
         self._add_general_row(properties_panel, properties_sizer, "child_alignment", "Child Alignment", self.field_child_alignment)
         self._add_general_row(properties_panel, properties_sizer, "spacing", "Spacing", self.field_spacing)
-        self._add_general_row(properties_panel, properties_sizer, "padding_left", "Padding Left", self.field_padding_left)
-        self._add_general_row(properties_panel, properties_sizer, "padding_right", "Padding Right", self.field_padding_right)
-        self._add_general_row(properties_panel, properties_sizer, "padding_top", "Padding Top", self.field_padding_top)
-        self._add_general_row(properties_panel, properties_sizer, "padding_bottom", "Padding Bottom", self.field_padding_bottom)
+        self._add_general_row(properties_panel, properties_sizer, "padding", "Padding (L/R/T/B)", self.padding_row_panel)
         self._add_general_row(properties_panel, properties_sizer, "width_mode", "Width Mode", self.field_width_mode)
         self._add_general_row(properties_panel, properties_sizer, "height_mode", "Height Mode", self.field_height_mode)
         self._add_general_row(properties_panel, properties_sizer, "scroll_vertical", "Scroll Vertical", self.field_scroll_vertical)
@@ -1627,13 +1636,22 @@ class DesignerPanel(wx.Panel):
         self.field_y.Bind(wx.EVT_SPINCTRL, self._on_property_changed)
         self.field_w.Bind(wx.EVT_SPINCTRL, self._on_width_value_changed)
         self.field_h.Bind(wx.EVT_SPINCTRL, self._on_height_value_changed)
+        self.field_x.Bind(wx.EVT_TEXT, self._on_property_changed)
+        self.field_y.Bind(wx.EVT_TEXT, self._on_property_changed)
+        self.field_w.Bind(wx.EVT_TEXT, self._on_width_value_changed)
+        self.field_h.Bind(wx.EVT_TEXT, self._on_height_value_changed)
         self.field_layout.Bind(wx.EVT_CHOICE, self._on_property_changed)
         self.field_child_alignment.Bind(wx.EVT_CHOICE, self._on_property_changed)
         self.field_spacing.Bind(wx.EVT_SPINCTRL, self._on_property_changed)
+        self.field_spacing.Bind(wx.EVT_TEXT, self._on_property_changed)
         self.field_padding_left.Bind(wx.EVT_SPINCTRL, self._on_property_changed)
         self.field_padding_right.Bind(wx.EVT_SPINCTRL, self._on_property_changed)
         self.field_padding_top.Bind(wx.EVT_SPINCTRL, self._on_property_changed)
         self.field_padding_bottom.Bind(wx.EVT_SPINCTRL, self._on_property_changed)
+        self.field_padding_left.Bind(wx.EVT_TEXT, self._on_property_changed)
+        self.field_padding_right.Bind(wx.EVT_TEXT, self._on_property_changed)
+        self.field_padding_top.Bind(wx.EVT_TEXT, self._on_property_changed)
+        self.field_padding_bottom.Bind(wx.EVT_TEXT, self._on_property_changed)
         self.field_width_mode.Bind(wx.EVT_CHOICE, self._on_property_changed)
         self.field_height_mode.Bind(wx.EVT_CHOICE, self._on_property_changed)
         self.field_scroll_vertical.Bind(wx.EVT_CHECKBOX, self._on_property_changed)
@@ -1949,7 +1967,7 @@ class DesignerPanel(wx.Panel):
         if node.element_type != "Space":
             relevant.update({"background_override", "background_color", "color_note"})
         if node.element_type in self.CONTAINER_TYPES:
-            relevant.update({"layout", "child_alignment", "spacing", "padding_left", "padding_right", "padding_top", "padding_bottom"})
+            relevant.update({"layout", "child_alignment", "spacing", "padding"})
         relevant.update({"width_mode", "height_mode"})
         if node.element_type in self.CONTAINER_TYPES:
             relevant.update({"scroll_vertical", "scroll_horizontal"})
@@ -2142,7 +2160,7 @@ class DesignerPanel(wx.Panel):
         return False
 
     def _schedule_snapshot_sync(self) -> None:
-        # Push every edit immediately so preview re-runs the full UITools tree each change.
+        # Debounce edit bursts so preview sync stays responsive without flooding websocket sends.
 
         if self._export_tab_active:
             return
@@ -2150,6 +2168,12 @@ class DesignerPanel(wx.Panel):
         if self._pending_sync is not None and self._pending_sync.IsRunning():
             self._pending_sync.Stop()
 
+        self._pending_sync = wx.CallLater(self._snapshot_sync_delay_ms, self._flush_snapshot_sync)
+
+    def _flush_snapshot_sync(self) -> None:
+        # Flush one pending sync request after debounce delay.
+
+        self._pending_sync = None
         self._sync_snapshot_to_bridge()
 
     def _on_tree_select(self, event: wx.TreeEvent) -> None:
@@ -2346,10 +2370,27 @@ class DesignerPanel(wx.Panel):
         if current_state == previous_state:
             return
 
+        source_control: Optional[wx.Window]
+        if _event is None:
+            source_control = None
+        else:
+            try:
+                source_control = _event.GetEventObject()
+            except Exception:
+                source_control = None
+
         if node.name != old_name:
             self._rebuild_tree(self._selection)
 
-        self._refresh_selection_only()
+        controls_requiring_ui_refresh = {
+            self.field_width_mode,
+            self.field_height_mode,
+            self.field_text_color_override,
+            self.field_background_color_override,
+        }
+        if source_control in controls_requiring_ui_refresh or _event is None:
+            self._refresh_selection_only()
+
         self.canvas.Refresh()
         self._schedule_snapshot_sync()
 
@@ -2360,11 +2401,6 @@ class DesignerPanel(wx.Panel):
                 self.field_background_color_override,
                 self.field_background_color,
             }
-
-            try:
-                source_control = _event.GetEventObject()
-            except Exception:
-                source_control = None
 
             if source_control in style_controls:
                 self._sync_snapshot_to_bridge(force=True)

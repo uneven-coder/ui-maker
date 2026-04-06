@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any, Optional
 
-CONTAINER_TYPES = {"Window", "Container", "Box"}
+CONTAINER_TYPES = {"Window", "ClosableWindow", "Container", "Box"}
 KNOWN_NODE_ORDER = [
     "id",
     "type",
@@ -70,12 +70,16 @@ def generate_csharp_export(snapshot: dict, source_file: Optional[Path]) -> str:
     # lines.extend(f"        {line}" for line in hierarchy_comment.splitlines())
     lines.append("")
     lines.append("        public static IReadOnlyList<UiNode> Define()")
-    lines.append("            => new List<UiNode>")
+    lines.append("        {")
+    lines.append("            // Build deterministic node definitions for runtime rendering.")
+    lines.append("")
+    lines.append("            return new List<UiNode>")
     lines.append("            {")
     root_sibling_count = len(normalized_snapshot["roots"])
     for root in normalized_snapshot["roots"]:
         lines.extend(_build_node_initializer_lines(root, export_id_map, indent=16, trailing_comma=True, sibling_count=root_sibling_count))
     lines.append("            };")
+    lines.append("        }")
     lines.append("")
     lines.extend(_emit_ui_node_class_lines())
     lines.append("    }")
@@ -97,14 +101,40 @@ def _emit_ui_node_class_lines() -> list[str]:
     lines.append("            public Builder.SceneToAttach SceneToAttach { get; set; } = Builder.SceneToAttach.CurrentScene;")
     lines.append("            public string HolderName { get; set; } = \"GeneratedUIHolder\";")
     lines.append("            public bool WindowDraggable { get; set; }")
+    lines.append("            public WindowRenderMode WindowMode { get; set; } = WindowRenderMode.AsDefined;")
     lines.append("            public int? Width { get; set; }")
     lines.append("            public int? Height { get; set; }")
     lines.append("            public bool StartHidden { get; set; }")
     lines.append("            public bool RemoveExistingBeforeRender { get; set; } = true;")
     lines.append("        }")
     lines.append("")
+    lines.append("        public enum WindowRenderMode")
+    lines.append("        {")
+    lines.append("            AsDefined,")
+    lines.append("            ForceNormal,")
+    lines.append("            ForceClosable,")
+    lines.append("        }")
+    lines.append("")
+    lines.append("        public enum UiNodeType")
+    lines.append("        {")
+    lines.append("            Window,")
+    lines.append("            ClosableWindow,")
+    lines.append("            Container,")
+    lines.append("            Box,")
+    lines.append("            Label,")
+    lines.append("            Button,")
+    lines.append("            TextInput,")
+    lines.append("            Toggle,")
+    lines.append("            Slider,")
+    lines.append("            Separator,")
+    lines.append("            Space,")
+    lines.append("            NumberInput,")
+    lines.append("        }")
+    lines.append("")
     lines.append("        public static Window? Render(RenderOptions? options = null)")
     lines.append("        {")
+    lines.append("            // Render full UI tree into a managed holder.")
+    lines.append("")
     lines.append("            options ??= new RenderOptions();")
     lines.append("            if (options.RemoveExistingBeforeRender)")
     lines.append("                Remove();")
@@ -125,12 +155,16 @@ def _emit_ui_node_class_lines() -> list[str]:
     lines.append("")
     lines.append("        public static void Render(Window window)")
     lines.append("        {")
+    lines.append("            // Keep compatibility with existing call sites that pass a Window.")
+    lines.append("")
     lines.append("            _ = window;")
     lines.append("            Render((RenderOptions?)null);")
     lines.append("        }")
     lines.append("")
     lines.append("        public static void Render(Transform parent)")
     lines.append("        {")
+    lines.append("            // Render definitions directly under an existing parent transform.")
+    lines.append("")
     lines.append("            _activeOptions = null;")
     lines.append("            foreach (var node in Define())")
     lines.append("                node.Build(parent);")
@@ -138,18 +172,24 @@ def _emit_ui_node_class_lines() -> list[str]:
     lines.append("")
     lines.append("        public static void Hide()")
     lines.append("        {")
+    lines.append("            // Hide generated holder without destroying it.")
+    lines.append("")
     lines.append("            if (_activeHolder != null)")
     lines.append("                _activeHolder.SetActive(false);")
     lines.append("        }")
     lines.append("")
     lines.append("        public static void Show()")
     lines.append("        {")
+    lines.append("            // Show generated holder if it exists.")
+    lines.append("")
     lines.append("            if (_activeHolder != null)")
     lines.append("                _activeHolder.SetActive(true);")
     lines.append("        }")
     lines.append("")
     lines.append("        public static void Remove()")
     lines.append("        {")
+    lines.append("            // Destroy generated holder and clear static render state.")
+    lines.append("")
     lines.append("            if (_activeHolder != null)")
     lines.append("            {")
     lines.append("                UnityEngine.Object.Destroy(_activeHolder);")
@@ -159,10 +199,40 @@ def _emit_ui_node_class_lines() -> list[str]:
     lines.append("            _activeOptions = null;")
     lines.append("        }")
     lines.append("")
+    lines.append("        private static bool ResolveClosableWindowMode(UiNodeType nodeType)")
+    lines.append("        {")
+    lines.append("            // Resolve whether a window node should render as ClosableWindow.")
+    lines.append("")
+    lines.append("            var mode = _activeOptions?.WindowMode ?? WindowRenderMode.AsDefined;")
+    lines.append("            switch (mode)")
+    lines.append("            {")
+    lines.append("                case WindowRenderMode.ForceClosable:")
+    lines.append("                    return nodeType == UiNodeType.Window || nodeType == UiNodeType.ClosableWindow;")
+    lines.append("                case WindowRenderMode.ForceNormal:")
+    lines.append("                    return false;")
+    lines.append("                default:")
+    lines.append("                    return nodeType == UiNodeType.ClosableWindow;")
+    lines.append("            }")
+    lines.append("        }")
+    lines.append("")
+    lines.append("        private static UiNode Node(string id, UiNodeType type, string name, int width, int height)")
+    lines.append("        {")
+    lines.append("            // Create one fluent node with required identity and dimensions.")
+    lines.append("")
+    lines.append("            return new UiNode")
+    lines.append("            {")
+    lines.append("                Id = id,")
+    lines.append("                Type = type,")
+    lines.append("                Name = name,")
+    lines.append("                Width = width,")
+    lines.append("                Height = height,")
+    lines.append("            };")
+    lines.append("        }")
+    lines.append("")
     lines.append("        public sealed class UiNode")
     lines.append("        {")
     lines.append("            public string Id { get; set; } = string.Empty;")
-    lines.append("            public string Type { get; set; } = string.Empty;")
+    lines.append("            public UiNodeType Type { get; set; } = UiNodeType.Container;")
     lines.append("            public string Name { get; set; } = string.Empty;")
     lines.append("            public int X { get; set; }")
     lines.append("            public int Y { get; set; }")
@@ -190,28 +260,120 @@ def _emit_ui_node_class_lines() -> list[str]:
     lines.append("            public bool ScrollHorizontal { get; set; }")
     lines.append("            public string PropsJson { get; set; } = \"{}\";")
     lines.append("            public List<UiNode> Children { get; set; } = new List<UiNode>();")
+    lines.append("            private int? _allocatedWidth;")
+    lines.append("            private int? _allocatedHeight;")
+    lines.append("")
+    lines.append("            public UiNode At(int x, int y)")
+    lines.append("            {")
+    lines.append("                X = x;")
+    lines.append("                Y = y;")
+    lines.append("                return this;")
+    lines.append("            }")
+    lines.append("")
+    lines.append("            public UiNode WithText(string text)")
+    lines.append("            {")
+    lines.append("                Text = text;")
+    lines.append("                return this;")
+    lines.append("            }")
+    lines.append("")
+    lines.append("            public UiNode Visual(string textAlignment, bool multiline, bool textColorOverride, string textColor, bool backgroundColorOverride, string backgroundColor, string borderColor)")
+    lines.append("            {")
+    lines.append("                TextAlignment = textAlignment;")
+    lines.append("                Multiline = multiline;")
+    lines.append("                TextColorOverride = textColorOverride;")
+    lines.append("                TextColor = textColor;")
+    lines.append("                BackgroundColorOverride = backgroundColorOverride;")
+    lines.append("                BackgroundColor = backgroundColor;")
+    lines.append("                BorderColor = borderColor;")
+    lines.append("                return this;")
+    lines.append("            }")
+    lines.append("")
+    lines.append("            public UiNode LayoutConfig(string layout, string childAlignment, int spacing, int paddingLeft, int paddingRight, int paddingTop, int paddingBottom)")
+    lines.append("            {")
+    lines.append("                Layout = layout;")
+    lines.append("                ChildAlignment = childAlignment;")
+    lines.append("                Spacing = spacing;")
+    lines.append("                PaddingLeft = paddingLeft;")
+    lines.append("                PaddingRight = paddingRight;")
+    lines.append("                PaddingTop = paddingTop;")
+    lines.append("                PaddingBottom = paddingBottom;")
+    lines.append("                return this;")
+    lines.append("            }")
+    lines.append("")
+    lines.append("            public UiNode Sizing(string widthMode, string heightMode, int siblingCount)")
+    lines.append("            {")
+    lines.append("                WidthMode = widthMode;")
+    lines.append("                HeightMode = heightMode;")
+    lines.append("                SiblingCount = Math.Max(1, siblingCount);")
+    lines.append("                return this;")
+    lines.append("            }")
+    lines.append("")
+    lines.append("            public UiNode Scroll(bool vertical, bool horizontal)")
+    lines.append("            {")
+    lines.append("                ScrollVertical = vertical;")
+    lines.append("                ScrollHorizontal = horizontal;")
+    lines.append("                return this;")
+    lines.append("            }")
+    lines.append("")
+    lines.append("            public UiNode Props(string propsJson)")
+    lines.append("            {")
+    lines.append("                PropsJson = propsJson;")
+    lines.append("                return this;")
+    lines.append("            }")
+    lines.append("")
+    lines.append("            public UiNode AddChildren(params UiNode[] children)")
+    lines.append("            {")
+    lines.append("                if (children == null || children.Length == 0)")
+    lines.append("                    return this;")
+    lines.append("                Children.AddRange(children);")
+    lines.append("                return this;")
+    lines.append("            }")
     lines.append("")
     lines.append("            public Transform Build(Transform parent)")
     lines.append("            {")
     lines.append("                var resolvedWidth = ResolveWidth(parent);")
     lines.append("                var resolvedHeight = ResolveHeight(parent);")
-    lines.append("                var draggable = ResolveWindowDraggable();")
+    lines.append("                var draggable = GeneratedLayout._activeOptions != null && GeneratedLayout._activeOptions.WindowDraggable;")
     lines.append("                object element;")
     lines.append("                Transform transform;")
     lines.append("                Transform childParent;")
     lines.append("")
     lines.append("                switch (Type)")
     lines.append("                {")
-    lines.append("                    case \"Window\":")
+    lines.append("                    case UiNodeType.Window:")
+    lines.append("                    case UiNodeType.ClosableWindow:")
     lines.append("                    {")
-    lines.append("                        var window = Builder.CreateWindow(parent, DeterministicId(Id), resolvedWidth, resolvedHeight, X, Y, draggable: draggable, savePosition: false, titleText: string.IsNullOrWhiteSpace(Text) ? Name : Text);")
-    lines.append("                        ConfigureLayout(window);")
-    lines.append("                        element = window;")
-    lines.append("                        transform = window.gameObject.transform;")
-    lines.append("                        childParent = window.ChildrenHolder;")
+    lines.append("                        if (GeneratedLayout.ResolveClosableWindowMode(Type))")
+    lines.append("                        {")
+    lines.append("                            var closable = UIToolsBuilder.CreateClosableWindow(parent, DeterministicId(Id), resolvedWidth, resolvedHeight, X, Y, draggable: draggable, savePosition: false, titleText: string.IsNullOrWhiteSpace(Text) ? Name : Text, minimized: false);")
+    lines.append("                            if (closable.rectTransform != null)")
+    lines.append("                                ClampRectTransformToScreen(closable.rectTransform);")
+    lines.append("                            ConfigureLayout(closable);")
+    lines.append("                            if (ScrollVertical)")
+    lines.append("                                closable.EnableScrolling(SFS.UI.ModGUI.Type.Vertical);")
+    lines.append("                            if (ScrollHorizontal)")
+    lines.append("                                closable.EnableScrolling(SFS.UI.ModGUI.Type.Horizontal);")
+    lines.append("                            element = closable;")
+    lines.append("                            transform = closable.gameObject.transform;")
+    lines.append("                            childParent = closable.ChildrenHolder;")
+    lines.append("                        }")
+    lines.append("                        else")
+    lines.append("                        {")
+    lines.append("                            var window = Builder.CreateWindow(parent, DeterministicId(Id), resolvedWidth, resolvedHeight, X, Y, draggable: draggable, savePosition: false, titleText: string.IsNullOrWhiteSpace(Text) ? Name : Text);")
+    lines.append("                            if (window.rectTransform != null)")
+    lines.append("                                ClampRectTransformToScreen(window.rectTransform);")
+    lines.append("                            ConfigureLayout(window);")
+    lines.append("                            if (ScrollVertical)")
+    lines.append("                                window.EnableScrolling(SFS.UI.ModGUI.Type.Vertical);")
+    lines.append("                            if (ScrollHorizontal)")
+    lines.append("                                window.EnableScrolling(SFS.UI.ModGUI.Type.Horizontal);")
+    lines.append("                            element = window;")
+    lines.append("                            transform = window.gameObject.transform;")
+    lines.append("                            childParent = window.ChildrenHolder;")
+    lines.append("                        }")
     lines.append("                        break;")
     lines.append("                    }")
-    lines.append("                    case \"Container\":")
+    lines.append("                    case UiNodeType.Container:")
     lines.append("                    {")
     lines.append("                        var container = Builder.CreateContainer(parent, X, Y);")
     lines.append("                        container.Size = new Vector2(resolvedWidth, resolvedHeight);")
@@ -221,7 +383,7 @@ def _emit_ui_node_class_lines() -> list[str]:
     lines.append("                        childParent = container.gameObject.transform;")
     lines.append("                        break;")
     lines.append("                    }")
-    lines.append("                    case \"Box\":")
+    lines.append("                    case UiNodeType.Box:")
     lines.append("                    {")
     lines.append("                        var box = Builder.CreateBox(parent, resolvedWidth, resolvedHeight, X, Y, opacity: 0.35f);")
     lines.append("                        ConfigureLayout(box);")
@@ -230,7 +392,7 @@ def _emit_ui_node_class_lines() -> list[str]:
     lines.append("                        childParent = box.gameObject.transform;")
     lines.append("                        break;")
     lines.append("                    }")
-    lines.append("                    case \"Label\":")
+    lines.append("                    case UiNodeType.Label:")
     lines.append("                    {")
     lines.append("                        var label = Builder.CreateLabel(parent, resolvedWidth, resolvedHeight, X, Y, Text);")
     lines.append("                        element = label;")
@@ -238,7 +400,7 @@ def _emit_ui_node_class_lines() -> list[str]:
     lines.append("                        childParent = label.gameObject.transform;")
     lines.append("                        break;")
     lines.append("                    }")
-    lines.append("                    case \"Button\":")
+    lines.append("                    case UiNodeType.Button:")
     lines.append("                    {")
     lines.append("                        var button = Builder.CreateButton(parent, resolvedWidth, resolvedHeight, X, Y, null, Text);")
     lines.append("                        element = button;")
@@ -246,7 +408,7 @@ def _emit_ui_node_class_lines() -> list[str]:
     lines.append("                        childParent = button.gameObject.transform;")
     lines.append("                        break;")
     lines.append("                    }")
-    lines.append("                    case \"TextInput\":")
+    lines.append("                    case UiNodeType.TextInput:")
     lines.append("                    {")
     lines.append("                        var input = Builder.CreateTextInput(parent, resolvedWidth, resolvedHeight, X, Y, Text, null);")
     lines.append("                        element = input;")
@@ -254,7 +416,7 @@ def _emit_ui_node_class_lines() -> list[str]:
     lines.append("                        childParent = input.gameObject.transform;")
     lines.append("                        break;")
     lines.append("                    }")
-    lines.append("                    case \"Toggle\":")
+    lines.append("                    case UiNodeType.Toggle:")
     lines.append("                    {")
     lines.append("                        var state = false;")
     lines.append("                        var toggle = Builder.CreateToggle(parent, () => state, X, Y, () => state = !state);")
@@ -263,7 +425,7 @@ def _emit_ui_node_class_lines() -> list[str]:
     lines.append("                        childParent = toggle.gameObject.transform;")
     lines.append("                        break;")
     lines.append("                    }")
-    lines.append("                    case \"Slider\":")
+    lines.append("                    case UiNodeType.Slider:")
     lines.append("                    {")
     lines.append("                        var slider = Builder.CreateSlider(parent, resolvedWidth, 0f, (0f, 1f), false, null, null);")
     lines.append("                        element = slider;")
@@ -271,7 +433,7 @@ def _emit_ui_node_class_lines() -> list[str]:
     lines.append("                        childParent = slider.gameObject.transform;")
     lines.append("                        break;")
     lines.append("                    }")
-    lines.append("                    case \"Separator\":")
+    lines.append("                    case UiNodeType.Separator:")
     lines.append("                    {")
     lines.append("                        var separator = Builder.CreateSeparator(parent, resolvedWidth, X, Y);")
     lines.append("                        element = separator;")
@@ -279,7 +441,7 @@ def _emit_ui_node_class_lines() -> list[str]:
     lines.append("                        childParent = separator.gameObject.transform;")
     lines.append("                        break;")
     lines.append("                    }")
-    lines.append("                    case \"Space\":")
+    lines.append("                    case UiNodeType.Space:")
     lines.append("                    {")
     lines.append("                        var space = Builder.CreateSpace(parent, resolvedWidth, resolvedHeight);")
     lines.append("                        element = space;")
@@ -287,7 +449,7 @@ def _emit_ui_node_class_lines() -> list[str]:
     lines.append("                        childParent = space.gameObject.transform;")
     lines.append("                        break;")
     lines.append("                    }")
-    lines.append("                    case \"NumberInput\":")
+    lines.append("                    case UiNodeType.NumberInput:")
     lines.append("                    {")
     lines.append("                        var number = UIToolsBuilder.CreateNumberInput(parent, resolvedWidth, resolvedHeight, 0f, 1f, X, Y);")
     lines.append("                        element = number;")
@@ -295,20 +457,12 @@ def _emit_ui_node_class_lines() -> list[str]:
     lines.append("                        childParent = number.gameObject.transform;")
     lines.append("                        break;")
     lines.append("                    }")
-    lines.append("                    case \"ClosableWindow\":")
-    lines.append("                    {")
-    lines.append("                        var closable = UIToolsBuilder.CreateClosableWindow(parent, DeterministicId(Id), resolvedWidth, resolvedHeight, X, Y, draggable: draggable, savePosition: false, titleText: string.IsNullOrWhiteSpace(Text) ? Name : Text, minimized: false);")
-    lines.append("                        ConfigureLayout(closable);")
-    lines.append("                        element = closable;")
-    lines.append("                        transform = closable.gameObject.transform;")
-    lines.append("                        childParent = closable.gameObject.transform;")
-    lines.append("                        break;")
-    lines.append("                    }")
     lines.append("                    default:")
     lines.append("                        throw new InvalidOperationException($\"Unsupported UiNode type: {Type}\");")
     lines.append("                }")
     lines.append("")
     lines.append("                ApplyVisualStyle(element);")
+    lines.append("                ApplyChildAutoSizing(resolvedWidth, resolvedHeight);")
     lines.append("")
     lines.append("                foreach (var child in Children)")
     lines.append("                    child.Build(childParent);")
@@ -318,7 +472,9 @@ def _emit_ui_node_class_lines() -> list[str]:
     lines.append("")
     lines.append("            private int ResolveWidth(Transform parent)")
     lines.append("            {")
-    lines.append("                if (Type == \"Window\" || Type == \"ClosableWindow\")")
+    lines.append("                if (_allocatedWidth != null)")
+    lines.append("                    return Math.Max(1, _allocatedWidth.Value);")
+    lines.append("                if (Type == UiNodeType.Window || Type == UiNodeType.ClosableWindow)")
     lines.append("                {")
     lines.append("                    var options = GeneratedLayout._activeOptions;")
     lines.append("                    if (options?.Width != null)")
@@ -330,7 +486,9 @@ def _emit_ui_node_class_lines() -> list[str]:
     lines.append("")
     lines.append("            private int ResolveHeight(Transform parent)")
     lines.append("            {")
-    lines.append("                if (Type == \"Window\" || Type == \"ClosableWindow\")")
+    lines.append("                if (_allocatedHeight != null)")
+    lines.append("                    return Math.Max(1, _allocatedHeight.Value);")
+    lines.append("                if (Type == UiNodeType.Window || Type == UiNodeType.ClosableWindow)")
     lines.append("                {")
     lines.append("                    var options = GeneratedLayout._activeOptions;")
     lines.append("                    if (options?.Height != null)")
@@ -370,19 +528,66 @@ def _emit_ui_node_class_lines() -> list[str]:
     lines.append("                return Math.Max(1, (int)Math.Round(available));")
     lines.append("            }")
     lines.append("")
-    lines.append("            private bool ResolveWindowDraggable()")
+    lines.append("            private void ApplyChildAutoSizing(int parentWidth, int parentHeight)")
     lines.append("            {")
-    lines.append("                var options = GeneratedLayout._activeOptions;")
-    lines.append("                return options != null && options.WindowDraggable;")
+    lines.append("                if (Children.Count == 0)")
+    lines.append("                    return;")
+    lines.append("")
+    lines.append("                var innerWidth = Math.Max(1, parentWidth - PaddingLeft - PaddingRight);")
+    lines.append("                var innerHeight = Math.Max(1, parentHeight - PaddingTop - PaddingBottom);")
+    lines.append("                var horizontal = string.Equals(Layout, \"Horizontal\", StringComparison.OrdinalIgnoreCase);")
+    lines.append("                var spacingTotal = Math.Max(0, Children.Count - 1) * Math.Max(0, Spacing);")
+    lines.append("")
+    lines.append("                if (horizontal)")
+    lines.append("                {")
+    lines.append("                    var primaryAvailable = Math.Max(1, innerWidth - spacingTotal);")
+    lines.append("                    var manualTotal = 0;")
+    lines.append("                    var autoCount = 0;")
+    lines.append("                    for (var i = 0; i < Children.Count; i++)")
+    lines.append("                    {")
+    lines.append("                        var child = Children[i];")
+    lines.append("                        if (string.Equals(child.WidthMode, \"Auto\", StringComparison.Ordinal))")
+    lines.append("                            autoCount += 1;")
+    lines.append("                        else")
+    lines.append("                            manualTotal += Math.Max(1, child.Width);")
+    lines.append("                    }")
+    lines.append("")
+    lines.append("                    var remaining = Math.Max(1, primaryAvailable - manualTotal);")
+    lines.append("                    var autoPrimary = autoCount > 0 ? Math.Max(1, remaining / autoCount) : 0;")
+    lines.append("                    for (var i = 0; i < Children.Count; i++)")
+    lines.append("                    {")
+    lines.append("                        var child = Children[i];")
+    lines.append("                        child._allocatedWidth = string.Equals(child.WidthMode, \"Auto\", StringComparison.Ordinal) ? autoPrimary : null;")
+    lines.append("                        child._allocatedHeight = string.Equals(child.HeightMode, \"Auto\", StringComparison.Ordinal) ? innerHeight : null;")
+    lines.append("                    }")
+    lines.append("                    return;")
+    lines.append("                }")
+    lines.append("")
+    lines.append("                var primaryHeightAvailable = Math.Max(1, innerHeight - spacingTotal);")
+    lines.append("                var manualHeightTotal = 0;")
+    lines.append("                var autoHeightCount = 0;")
+    lines.append("                for (var i = 0; i < Children.Count; i++)")
+    lines.append("                {")
+    lines.append("                    var child = Children[i];")
+    lines.append("                    if (string.Equals(child.HeightMode, \"Auto\", StringComparison.Ordinal))")
+    lines.append("                        autoHeightCount += 1;")
+    lines.append("                    else")
+    lines.append("                        manualHeightTotal += Math.Max(1, child.Height);")
+    lines.append("                }")
+    lines.append("")
+    lines.append("                var remainingHeight = Math.Max(1, primaryHeightAvailable - manualHeightTotal);")
+    lines.append("                var autoHeight = autoHeightCount > 0 ? Math.Max(1, remainingHeight / autoHeightCount) : 0;")
+    lines.append("                for (var i = 0; i < Children.Count; i++)")
+    lines.append("                {")
+    lines.append("                    var child = Children[i];")
+    lines.append("                    child._allocatedWidth = string.Equals(child.WidthMode, \"Auto\", StringComparison.Ordinal) ? innerWidth : null;")
+    lines.append("                    child._allocatedHeight = string.Equals(child.HeightMode, \"Auto\", StringComparison.Ordinal) ? autoHeight : null;")
+    lines.append("                }")
     lines.append("            }")
     lines.append("")
     lines.append("            private void ConfigureLayout(Window window)")
     lines.append("            {")
     lines.append("                window.CreateLayoutGroup(ParseLayoutType(Layout), ParseTextAnchor(ChildAlignment), Spacing, new RectOffset(PaddingLeft, PaddingRight, PaddingTop, PaddingBottom), true);")
-    lines.append("                if (ScrollVertical)")
-    lines.append("                    window.EnableScrolling(SFS.UI.ModGUI.Type.Vertical);")
-    lines.append("                if (ScrollHorizontal)")
-    lines.append("                    window.EnableScrolling(SFS.UI.ModGUI.Type.Horizontal);")
     lines.append("            }")
     lines.append("")
     lines.append("            private void ConfigureLayout(Container container)")
@@ -442,22 +647,70 @@ def _emit_ui_node_class_lines() -> list[str]:
     lines.append("                }")
     lines.append("            }")
     lines.append("")
+    lines.append("            private static void ClampRectTransformToScreen(RectTransform rectTransform)")
+    lines.append("            {")
+    lines.append("                var corners = new Vector3[4];")
+    lines.append("                rectTransform.GetWorldCorners(corners);")
+    lines.append("")
+    lines.append("                var minX = Mathf.Min(corners[0].x, corners[2].x);")
+    lines.append("                var minY = Mathf.Min(corners[0].y, corners[2].y);")
+    lines.append("                var maxX = Mathf.Max(corners[0].x, corners[2].x);")
+    lines.append("                var maxY = Mathf.Max(corners[0].y, corners[2].y);")
+    lines.append("")
+    lines.append("                var deltaX = 0f;")
+    lines.append("                var deltaY = 0f;")
+    lines.append("                if (minX < 0f)")
+    lines.append("                    deltaX = -minX;")
+    lines.append("                else if (maxX > Screen.width)")
+    lines.append("                    deltaX = Screen.width - maxX;")
+    lines.append("")
+    lines.append("                if (minY < 0f)")
+    lines.append("                    deltaY = -minY;")
+    lines.append("                else if (maxY > Screen.height)")
+    lines.append("                    deltaY = Screen.height - maxY;")
+    lines.append("")
+    lines.append("                if (Mathf.Abs(deltaX) < 0.01f && Mathf.Abs(deltaY) < 0.01f)")
+    lines.append("                    return;")
+    lines.append("")
+    lines.append("                rectTransform.position += new Vector3(deltaX, deltaY, 0f);")
+    lines.append("            }")
+    lines.append("")
     lines.append("            private static SFS.UI.ModGUI.Type ParseLayoutType(string value)")
-    lines.append("                => string.Equals(value, \"Horizontal\", StringComparison.OrdinalIgnoreCase) ? SFS.UI.ModGUI.Type.Horizontal : SFS.UI.ModGUI.Type.Vertical;")
+    lines.append("            {")
+    lines.append("                // Parse layout direction with explicit default behavior.")
+    lines.append("")
+    lines.append("                if (string.Equals(value, \"Horizontal\", StringComparison.OrdinalIgnoreCase))")
+    lines.append("                    return SFS.UI.ModGUI.Type.Horizontal;")
+    lines.append("")
+    lines.append("                return SFS.UI.ModGUI.Type.Vertical;")
+    lines.append("            }")
     lines.append("")
     lines.append("            private static TextAnchor ParseTextAnchor(string value)")
-    lines.append("                => value switch")
+    lines.append("            {")
+    lines.append("                // Parse text anchor names into Unity TextAnchor values.")
+    lines.append("")
+    lines.append("                switch (value)")
     lines.append("                {")
-    lines.append("                    \"UpperCenter\" => TextAnchor.UpperCenter,")
-    lines.append("                    \"UpperRight\" => TextAnchor.UpperRight,")
-    lines.append("                    \"MiddleLeft\" => TextAnchor.MiddleLeft,")
-    lines.append("                    \"MiddleCenter\" => TextAnchor.MiddleCenter,")
-    lines.append("                    \"MiddleRight\" => TextAnchor.MiddleRight,")
-    lines.append("                    \"LowerLeft\" => TextAnchor.LowerLeft,")
-    lines.append("                    \"LowerCenter\" => TextAnchor.LowerCenter,")
-    lines.append("                    \"LowerRight\" => TextAnchor.LowerRight,")
-    lines.append("                    _ => TextAnchor.UpperLeft,")
-    lines.append("                };")
+    lines.append("                    case \"UpperCenter\":")
+    lines.append("                        return TextAnchor.UpperCenter;")
+    lines.append("                    case \"UpperRight\":")
+    lines.append("                        return TextAnchor.UpperRight;")
+    lines.append("                    case \"MiddleLeft\":")
+    lines.append("                        return TextAnchor.MiddleLeft;")
+    lines.append("                    case \"MiddleCenter\":")
+    lines.append("                        return TextAnchor.MiddleCenter;")
+    lines.append("                    case \"MiddleRight\":")
+    lines.append("                        return TextAnchor.MiddleRight;")
+    lines.append("                    case \"LowerLeft\":")
+    lines.append("                        return TextAnchor.LowerLeft;")
+    lines.append("                    case \"LowerCenter\":")
+    lines.append("                        return TextAnchor.LowerCenter;")
+    lines.append("                    case \"LowerRight\":")
+    lines.append("                        return TextAnchor.LowerRight;")
+    lines.append("                    default:")
+    lines.append("                        return TextAnchor.UpperLeft;")
+    lines.append("                }")
+    lines.append("            }")
     lines.append("")
     lines.append("            private static int DeterministicId(string id)")
     lines.append("            {")
@@ -507,7 +760,7 @@ def _build_node_initializer_lines(
     trailing_comma: bool,
     sibling_count: int,
 ) -> list[str]:
-    # Emit one nested object initializer block with only non-default fields.
+    # Emit one fluent monadic node expression with chainable configuration.
 
     node_id = str(node.get("id", ""))
     export_id = _escape_csharp_string(export_id_map[node_id])
@@ -516,7 +769,7 @@ def _build_node_initializer_lines(
     pad = " " * indent
     child_pad = " " * (indent + 4)
 
-    type_text = _escape_csharp_string(str(node.get("type", "Container")))
+    node_type_enum = _to_node_type_enum(str(node.get("type", "Container")))
     name_text = _escape_csharp_string(str(node.get("name", "Node")))
     text_text = _escape_csharp_string(str(node.get("text", "")))
     text_alignment = _escape_csharp_string(str(node.get("text_alignment", "Left")))
@@ -545,72 +798,53 @@ def _build_node_initializer_lines(
     scroll_vertical = _bool_token(_as_bool(node.get("scroll_vertical", False), "scroll_vertical"))
     scroll_horizontal = _bool_token(_as_bool(node.get("scroll_horizontal", False), "scroll_horizontal"))
 
-    lines.append(f"{pad}new UiNode")
-    lines.append(f"{pad}{{")
+    lines.append(f'{pad}Node("{export_id}", UiNodeType.{node_type_enum}, "{name_text}", {width}, {height})')
 
-    property_lines: list[str] = [
-        f'Id = "{export_id}",',
-        f'Type = "{type_text}",',
-        f'Name = "{name_text}",',
-        f"Width = {width},",
-        f"Height = {height},",
-    ]
-
-    if x != 0:
-        property_lines.append(f"X = {x},")
-    if y != 0:
-        property_lines.append(f"Y = {y},")
+    if x != 0 or y != 0:
+        lines.append(f"{child_pad}.At({x}, {y})")
     if text_text != "":
-        property_lines.append(f'Text = "{text_text}",')
-    if text_alignment != "Left":
-        property_lines.append(f'TextAlignment = "{text_alignment}",')
-    if text_color_override != "false":
-        property_lines.append(f"TextColorOverride = {text_color_override},")
-    if text_color != "#ffffff":
-        property_lines.append(f'TextColor = "{text_color}",')
-    if background_color_override != "false":
-        property_lines.append(f"BackgroundColorOverride = {background_color_override},")
-    if background_color != "":
-        property_lines.append(f'BackgroundColor = "{background_color}",')
-    if border_color != "":
-        property_lines.append(f'BorderColor = "{border_color}",')
-    if multiline != "false":
-        property_lines.append(f"Multiline = {multiline},")
-    if layout != "Vertical":
-        property_lines.append(f'Layout = "{layout}",')
-    if child_alignment != "UpperLeft":
-        property_lines.append(f'ChildAlignment = "{child_alignment}",')
-    if spacing != 12:
-        property_lines.append(f"Spacing = {spacing},")
-    if padding_left != 12:
-        property_lines.append(f"PaddingLeft = {padding_left},")
-    if padding_right != 12:
-        property_lines.append(f"PaddingRight = {padding_right},")
-    if padding_top != 12:
-        property_lines.append(f"PaddingTop = {padding_top},")
-    if padding_bottom != 12:
-        property_lines.append(f"PaddingBottom = {padding_bottom},")
-    if width_mode != "Manual":
-        property_lines.append(f'WidthMode = "{width_mode}",')
-    if height_mode != "Manual":
-        property_lines.append(f'HeightMode = "{height_mode}",')
-    if sibling_count > 1:
-        property_lines.append(f"SiblingCount = {sibling_count},")
-    if scroll_vertical != "false":
-        property_lines.append(f"ScrollVertical = {scroll_vertical},")
-    if scroll_horizontal != "false":
-        property_lines.append(f"ScrollHorizontal = {scroll_horizontal},")
-    if props_json != "{}":
-        property_lines.append(f'PropsJson = "{props_json}",')
+        lines.append(f'{child_pad}.WithText("{text_text}")')
 
-    for line in property_lines:
-        lines.append(f"{child_pad}{line}")
+    has_visual_change = (
+        text_alignment != "Left"
+        or multiline != "false"
+        or text_color_override != "false"
+        or text_color != "#ffffff"
+        or background_color_override != "false"
+        or background_color != ""
+        or border_color != ""
+    )
+    if has_visual_change:
+        lines.append(
+            f'{child_pad}.Visual("{text_alignment}", {multiline}, {text_color_override}, "{text_color}", {background_color_override}, "{background_color}", "{border_color}")'
+        )
+
+    has_layout_change = (
+        layout != "Vertical"
+        or child_alignment != "UpperLeft"
+        or spacing != 12
+        or padding_left != 12
+        or padding_right != 12
+        or padding_top != 12
+        or padding_bottom != 12
+    )
+    if has_layout_change:
+        lines.append(
+            f'{child_pad}.LayoutConfig("{layout}", "{child_alignment}", {spacing}, {padding_left}, {padding_right}, {padding_top}, {padding_bottom})'
+        )
+
+    if width_mode != "Manual" or height_mode != "Manual" or sibling_count > 1:
+        lines.append(f'{child_pad}.Sizing("{width_mode}", "{height_mode}", {sibling_count})')
+
+    if scroll_vertical != "false" or scroll_horizontal != "false":
+        lines.append(f"{child_pad}.Scroll({scroll_vertical}, {scroll_horizontal})")
+    if props_json != "{}":
+        lines.append(f'{child_pad}.Props("{props_json}")')
 
     children = node.get("children", [])
     if isinstance(children, list) and len(children) > 0:
         child_sibling_count = len(children)
-        lines.append(f"{child_pad}Children =")
-        lines.append(f"{child_pad}{{")
+        lines.append(f"{child_pad}.AddChildren(")
         for index, child in enumerate(children):
             if not isinstance(child, dict):
                 continue
@@ -619,9 +853,10 @@ def _build_node_initializer_lines(
             if suffix and len(child_lines) > 0:
                 child_lines[-1] = child_lines[-1] + suffix
             lines.extend(child_lines)
-        lines.append(f"{child_pad}}}")
+        lines.append(f"{child_pad})")
 
-    lines.append(f"{pad}}}{',' if trailing_comma else ''}")
+    if trailing_comma and len(lines) > 0:
+        lines[-1] = lines[-1] + ","
 
     return lines
 
@@ -862,6 +1097,30 @@ def _build_hierarchy_lines(roots: list[dict[str, Any]], export_id_map: dict[str,
         walk(root, depth=0)
 
     return lines
+
+
+def _to_node_type_enum(value: str) -> str:
+    # Convert serialized node type tokens to generated UiNodeType enum members.
+
+    normalized = value.strip()
+    allowed = {
+        "Window",
+        "ClosableWindow",
+        "Container",
+        "Box",
+        "Label",
+        "Button",
+        "TextInput",
+        "Toggle",
+        "Slider",
+        "Separator",
+        "Space",
+        "NumberInput",
+    }
+    if normalized in allowed:
+        return normalized
+
+    raise ValueError(f"Unsupported node type for export: {value}")
 
 
 def _escape_csharp_string(value: str) -> str:
