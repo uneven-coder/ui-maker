@@ -136,6 +136,7 @@ Download the latest release from the Releases page and extract it to a folder.
 or if you would like the latet version / build your own:
 1. Clone the repo and open `sfs-ui-cdn.sln`
     - its recomended to create a post-build step to copy the built `sfs-ui-cdn.dll` to your SFS Mods folder for easier testing.
+    - ps. the Build command will use msbuild, its just what i use to make mods, you can change this (not easily) in the `ui_runtime.py`
 3. Run `main.py` to start the editor.
 
 4. start sfs
