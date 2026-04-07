@@ -135,6 +135,12 @@ I dont have plans to maintain a latest version, you may have to build your own v
 
 Download the latest release from the Releases page and extract it to a folder. 
 1. Copy the `sfs-ui-cdn.dll` to your SFS Mods folder.
+
+Install the `requirements.txt` dependencies using pip:
+```python
+pip install -r requirements.txt
+```
+
 2. Run `main.py` to start the editor.
 
 or if you would like the latet version / build your own:
