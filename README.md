@@ -247,3 +247,6 @@ The generated c# code will include all the helper functions it needs like Types 
 - Treat this as a strong acceleration tool for layout, structure, and preview-driven iteration.
 - Expect to do final manual polish/validation inside your mod code for advanced edge cases.
 - I have designed it to be responsive but ive had to comprimise some features to achive preview and c# generation so responsiveness is only expected during ui design not in export.
+
+Issues:
+- Scrolling dosent work, or atleast in the normal window
