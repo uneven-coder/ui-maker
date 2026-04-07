@@ -73,8 +73,12 @@ The layout overlay is great for visualising the true size and position of elemen
 	- Optional hide-window scope while editing components
 	- In-game preview mirroring from the primary bridge feed
     - customisable Host preview options for component instances (background mode with transparent or solid color for easy viewing, host W/H auto when set to 0 allwoing it to adapt to the component size)
-	- Global propagation of shared component template edits across all instances
+	- All components share changes, in development you have to implement dynamic properities
     - *Issue:* The layout preview may be broken and so its recomended to be hidden
+The component editor makes it easy to work on elements in isolation.
+<img width="1366" height="893" alt="image" src="https://github.com/user-attachments/assets/6557c50f-ca1f-4e13-a289-604f13f7d645" />
+
+
 
 - Elements
 	- Window, ClosableWindow, Container, Box
