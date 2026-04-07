@@ -14,8 +14,11 @@ class DesignerCanvas(wx.Panel):
         "Box": wx.Colour(80, 60, 110),
         "Label": wx.Colour(160, 160, 80),
         "Button": wx.Colour(70, 120, 80),
+        "ButtonWithLabel": wx.Colour(80, 135, 90),
         "TextInput": wx.Colour(100, 80, 130),
+        "InputWithLabel": wx.Colour(120, 92, 150),
         "Toggle": wx.Colour(130, 90, 70),
+        "ToggleWithLabel": wx.Colour(145, 100, 80),
         "Slider": wx.Colour(70, 110, 150),
         "Separator": wx.Colour(130, 130, 130),
         "Space": wx.Colour(90, 90, 90),
@@ -31,9 +34,25 @@ class DesignerCanvas(wx.Panel):
         self._authoritative_capture: Optional[tuple[float, float]] = None
         self._authoritative_nodes: dict[str, tuple[float, float, float, float]] = {}
         self._frame_bitmap: Optional[wx.Bitmap] = None
+        self._scope_root_ids: Optional[list[str]] = None
+        self._hide_window_nodes = False
         self.SetBackgroundStyle(wx.BG_STYLE_PAINT)
         self.Bind(wx.EVT_PAINT, self._on_paint)
         self.Bind(wx.EVT_LEFT_DOWN, self._on_left_down)
+
+    def set_scope(self, root_ids: Optional[list[str]], hide_window_nodes: bool = False) -> None:
+        # Restrict rendering/hit-testing to a subset of roots for focused component editing.
+
+        self._scope_root_ids = list(root_ids) if root_ids is not None else None
+        self._hide_window_nodes = hide_window_nodes
+        self.Refresh()
+
+    def _iter_root_ids(self) -> list[str]:
+        # Return active root ids for drawing order, filtered to existing nodes.
+
+        if self._scope_root_ids is None:
+            return [root_id for root_id in self._document.roots if root_id in self._document.elements]
+        return [root_id for root_id in self._scope_root_ids if root_id in self._document.elements]
 
     def set_selected(self, element_id: Optional[str]) -> None:
         # Track selected element so canvas can highlight current target.
@@ -111,8 +130,8 @@ class DesignerCanvas(wx.Panel):
             dc.DrawLine(0, y, size.width, y)
 
         if self._authoritative_capture is not None and self._authoritative_nodes:
-            self._draw_authoritative(dc, size)
-            return
+            if self._draw_authoritative(dc, size):
+                return
 
         self._last_layout_rects = []
         root_x = 20
@@ -120,7 +139,7 @@ class DesignerCanvas(wx.Panel):
         ordered_ids = self._iter_node_ids_in_order()
         order_map = {node_id: index for index, node_id in enumerate(ordered_ids)}
         depth_map = self._build_depth_map()
-        for root_id in self._document.roots:
+        for root_id in self._iter_root_ids():
             consumed = self._draw_node(
                 dc,
                 root_id,
@@ -132,12 +151,12 @@ class DesignerCanvas(wx.Panel):
             )
             root_y += consumed + 16
 
-    def _draw_authoritative(self, dc: wx.AutoBufferedPaintDC, size: wx.Size) -> None:
+    def _draw_authoritative(self, dc: wx.AutoBufferedPaintDC, size: wx.Size) -> bool:
         # Draw element rectangles from SFS-provided capture-space metrics.
 
         capture_width, capture_height = self._authoritative_capture if self._authoritative_capture is not None else (0.0, 0.0)
         if capture_width <= 0.0 or capture_height <= 0.0:
-            return
+            return False
 
         scale = min(size.width / capture_width, size.height / capture_height)
         scale = max(0.01, scale)
@@ -147,6 +166,7 @@ class DesignerCanvas(wx.Panel):
         offset_y = (size.height - draw_height) // 2
 
         self._last_layout_rects = []
+        drawn_count = 0
         ordered_ids = self._iter_node_ids_in_order()
         order_map = {node_id: index for index, node_id in enumerate(ordered_ids)}
         depth_map = self._build_depth_map()
@@ -156,7 +176,7 @@ class DesignerCanvas(wx.Panel):
                 continue
 
             node = self._document.elements.get(node_id)
-            if node is not None and node.element_type in {"Window", "ClosableWindow"}:
+            if self._hide_window_nodes and node is not None and node.element_type in {"Window", "ClosableWindow"}:
                 continue
 
             rel_x, rel_y, rel_w, rel_h = metrics
@@ -166,6 +186,7 @@ class DesignerCanvas(wx.Panel):
             ph = max(1, int(rel_h * scale))
             rect = wx.Rect(px, py, pw, ph)
             self._last_layout_rects.append((node_id, rect))
+            drawn_count += 1
 
             base_color = self.COLORS.get(node.element_type if node is not None else "", wx.Colour(100, 100, 100))
             color = self._overlay_variant_color(base_color, order_map.get(node_id, 0), depth_map.get(node_id, 0))
@@ -178,9 +199,11 @@ class DesignerCanvas(wx.Panel):
             dc.DrawRectangle(rect)
 
             if node is not None:
-                label = node.name if node.text == "" else f"{node.name}: {node.text}"
+                label = self._node_label(node)
                 dc.SetTextForeground(wx.Colour(245, 245, 245))
                 dc.DrawText(label, rect.x + 4, rect.y + 2)
+
+        return drawn_count > 0
 
     def _draw_frame_fit(self, dc: wx.AutoBufferedPaintDC, size: wx.Size) -> None:
         # Draw live game frame centered in canvas bounds while preserving aspect ratio.
@@ -217,7 +240,7 @@ class DesignerCanvas(wx.Panel):
             for child in node.children:
                 walk(child)
 
-        for root in self._document.roots:
+        for root in self._iter_root_ids():
             walk(root)
 
         return ordered
@@ -238,7 +261,7 @@ class DesignerCanvas(wx.Panel):
         width = node.width if node.width_mode == SIZE_MODE_MANUAL else available_width
         width = max(20, width)
         rect = wx.Rect(x, y, width, node.height)
-        if node.element_type not in {"Window", "ClosableWindow"}:
+        if not (self._hide_window_nodes and node.element_type in {"Window", "ClosableWindow"}):
             self._last_layout_rects.append((node_id, rect))
             base_color = self.COLORS.get(node.element_type, wx.Colour(100, 100, 100))
             color = self._overlay_variant_color(base_color, order_map.get(node_id, 0), depth_map.get(node_id, 0))
@@ -251,7 +274,7 @@ class DesignerCanvas(wx.Panel):
 
             dc.DrawRectangle(rect)
 
-            label = node.name if node.text == "" else f"{node.name}: {node.text}"
+            label = self._node_label(node)
             dc.SetTextForeground(wx.Colour(238, 238, 238))
             dc.DrawText(label, x + 6, y + 6)
 
@@ -299,7 +322,7 @@ class DesignerCanvas(wx.Panel):
             for child_id in node.children:
                 walk(child_id, depth + 1)
 
-        for root_id in self._document.roots:
+        for root_id in self._iter_root_ids():
             walk(root_id, 0)
 
         return depth_map
@@ -323,6 +346,19 @@ class DesignerCanvas(wx.Panel):
         self._selected_id = hit
 
         self.Refresh()
+
+    @staticmethod
+    def _node_label(node) -> str:
+        # Include component metadata badges so reusable parts are visible in canvas overlay labels.
+
+        base = node.name if node.text == "" else f"{node.name}: {node.text}"
+        component_id = node.props.get("__component_id") if isinstance(node.props, dict) else None
+        instance_root = node.props.get("__component_instance_root") if isinstance(node.props, dict) else None
+        if isinstance(component_id, str) and component_id != "":
+            if isinstance(instance_root, str) and instance_root == node.id:
+                return f"{base} [CR]"
+            return f"{base} [♳]"
+        return base
 
     def _hit_test(self, position: wx.Point) -> Optional[str]:
         # Return top-most element ID at point using the latest layout-calculated rectangles.

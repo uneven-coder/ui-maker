@@ -51,6 +51,15 @@ class UIElement:
     children: list[str] = field(default_factory=list)
 
 
+@dataclass
+class UIComponentDefinition:
+    # Hold one reusable component template as a serialized subtree payload.
+
+    id: str
+    name: str
+    template: dict
+
+
 def normalize_size_mode(value: object, axis: str) -> str:
     # Validate and normalize a serialized size mode token.
 
@@ -71,8 +80,12 @@ def legacy_full_flag_to_size_mode(value: object) -> str:
 
 
 def default_props_for_type(element_type: str) -> dict[str, object]:
-    # Element-specific props were removed from the editor to avoid conflicting values.
+    # Provide element-specific defaults needed for composite/labeled controls.
 
+    if element_type in {"ButtonWithLabel", "InputWithLabel"}:
+        return {"label_direction": "Top"}
+    if element_type == "ToggleWithLabel":
+        return {"label_direction": "Left"}
     return {}
 
 
@@ -84,7 +97,413 @@ class UIDocument:
     def __init__(self):
         self.elements: dict[str, UIElement] = {}
         self.roots: list[str] = []
+        self.components: dict[str, UIComponentDefinition] = {}
+        self.component_instances: dict[str, str] = {}
         self.file_path: Optional[Path] = None
+
+    @staticmethod
+    def _component_prop_key(name: str) -> str:
+        # Namespace internal component metadata keys to avoid collisions with user props.
+
+        return f"__component_{name}"
+
+    def _set_component_metadata(self, node: UIElement, component_id: str, instance_root_id: str, node_path: str) -> None:
+        # Stamp linkage metadata used for cross-instance synchronization.
+
+        node.props[self._component_prop_key("id")] = component_id
+        node.props[self._component_prop_key("instance_root")] = instance_root_id
+        node.props[self._component_prop_key("path")] = node_path
+
+    def _clear_component_metadata(self, node: UIElement) -> None:
+        # Remove linkage metadata from one node.
+
+        for key in (
+            self._component_prop_key("id"),
+            self._component_prop_key("instance_root"),
+            self._component_prop_key("path"),
+        ):
+            node.props.pop(key, None)
+
+    def _extract_component_metadata(self, node: UIElement) -> tuple[str, str, str] | None:
+        # Read component linkage from a node when present.
+
+        component_id = node.props.get(self._component_prop_key("id"))
+        instance_root = node.props.get(self._component_prop_key("instance_root"))
+        node_path = node.props.get(self._component_prop_key("path"))
+        if not isinstance(component_id, str) or not isinstance(instance_root, str) or not isinstance(node_path, str):
+            return None
+        if component_id == "" or instance_root == "":
+            return None
+        return component_id, instance_root, node_path
+
+    @staticmethod
+    def _node_with_payload(node: UIElement, children_payload: list[dict]) -> dict:
+        # Materialize one node payload matching the project JSON schema.
+
+        return {
+            "id": node.id,
+            "type": node.element_type,
+            "name": node.name,
+            "x": node.x,
+            "y": node.y,
+            "width": node.width,
+            "height": node.height,
+            "text": node.text,
+            "text_alignment": node.text_alignment,
+            "text_color_override": node.text_color_override,
+            "text_color": node.text_color,
+            "background_color_override": node.background_color_override,
+            "background_color": node.background_color,
+            "multiline": node.multiline,
+            "border_color": node.border_color,
+            "layout": node.layout,
+            "child_alignment": node.child_alignment,
+            "spacing": node.spacing,
+            "padding": node.padding_left,
+            "padding_left": node.padding_left,
+            "padding_right": node.padding_right,
+            "padding_top": node.padding_top,
+            "padding_bottom": node.padding_bottom,
+            "width_mode": node.width_mode,
+            "height_mode": node.height_mode,
+            "scroll_vertical": node.scroll_vertical,
+            "scroll_horizontal": node.scroll_horizontal,
+            "props": dict(node.props),
+            "children": children_payload,
+        }
+
+    def _serialize_node_tree(self, node_id: str) -> dict:
+        # Serialize one subtree into nested payload form.
+
+        node = self.elements[node_id]
+        children_payload = [self._serialize_node_tree(child_id) for child_id in node.children]
+        return self._node_with_payload(node, children_payload)
+
+    @staticmethod
+    def _strip_component_ids(payload: dict) -> dict:
+        # Remove runtime-only IDs so component templates can be instantiated with fresh identifiers.
+
+        copied = dict(payload)
+        copied.pop("id", None)
+        props_value = copied.get("props", {})
+        props_out: dict[str, object] = {}
+        if isinstance(props_value, dict):
+            for key, value in props_value.items():
+                if isinstance(key, str) and key.startswith("__component_"):
+                    continue
+                props_out[str(key)] = value
+        copied["props"] = props_out
+        children_value = copied.get("children", [])
+        children_out: list[dict] = []
+        if isinstance(children_value, list):
+            for child in children_value:
+                if isinstance(child, dict):
+                    children_out.append(UIDocument._strip_component_ids(child))
+        copied["children"] = children_out
+        return copied
+
+    def _clone_payload_into_document(
+        self,
+        payload: dict,
+        component_id: Optional[str],
+        instance_root_id: Optional[str],
+        path: str,
+    ) -> str:
+        # Clone one serialized payload into document nodes and return new root ID.
+
+        element_type = str(payload.get("type", ""))
+        if element_type == "":
+            raise ValueError("Component template node is missing type.")
+
+        new_id = str(uuid.uuid4())
+        text_color = str(payload.get("text_color", "#ffffff"))
+        text_color_override = bool(payload.get("text_color_override", False))
+        background_color = str(payload.get("background_color", ""))
+        background_color_override = bool(payload.get("background_color_override", False))
+        legacy_padding = int(payload.get("padding", 12))
+
+        element = UIElement(
+            id=new_id,
+            element_type=element_type,
+            name=str(payload.get("name", element_type)),
+            x=int(payload.get("x", 0)),
+            y=int(payload.get("y", 0)),
+            width=max(SAFE_MIN_SIZE, min(SAFE_MAX_SIZE, int(payload.get("width", 220)))),
+            height=max(SAFE_MIN_SIZE, min(SAFE_MAX_SIZE, int(payload.get("height", 70)))),
+            text=str(payload.get("text", "")),
+            text_alignment=str(payload.get("text_alignment", "Left")),
+            text_color_override=text_color_override,
+            text_color=text_color,
+            background_color_override=background_color_override,
+            background_color=background_color,
+            multiline=bool(payload.get("multiline", False)),
+            border_color=str(payload.get("border_color", "")),
+            layout=str(payload.get("layout", "Vertical")),
+            child_alignment=str(payload.get("child_alignment", "UpperLeft")),
+            spacing=max(SAFE_MIN_SPACING, min(SAFE_MAX_SPACING, int(payload.get("spacing", 12)))),
+            padding_left=max(SAFE_MIN_PADDING, min(SAFE_MAX_PADDING, int(payload.get("padding_left", legacy_padding)))),
+            padding_right=max(SAFE_MIN_PADDING, min(SAFE_MAX_PADDING, int(payload.get("padding_right", legacy_padding)))),
+            padding_top=max(SAFE_MIN_PADDING, min(SAFE_MAX_PADDING, int(payload.get("padding_top", legacy_padding)))),
+            padding_bottom=max(SAFE_MIN_PADDING, min(SAFE_MAX_PADDING, int(payload.get("padding_bottom", legacy_padding)))),
+            width_mode=normalize_size_mode(payload.get("width_mode", legacy_full_flag_to_size_mode(payload.get("full_width", True))), "width"),
+            height_mode=normalize_size_mode(payload.get("height_mode", legacy_full_flag_to_size_mode(payload.get("full_height", False))), "height"),
+            scroll_vertical=bool(payload.get("scroll_vertical", False)),
+            scroll_horizontal=bool(payload.get("scroll_horizontal", False)),
+            props=dict(payload.get("props", {})) if isinstance(payload.get("props", {}), dict) else {},
+        )
+        self.elements[new_id] = element
+
+        if component_id is not None and instance_root_id is not None:
+            self._set_component_metadata(element, component_id, instance_root_id, path)
+
+        children_value = payload.get("children", [])
+        if isinstance(children_value, list):
+            for index, child in enumerate(children_value):
+                if not isinstance(child, dict):
+                    continue
+                child_path = str(index) if path == "" else f"{path}/{index}"
+                child_id = self._clone_payload_into_document(child, component_id, instance_root_id, child_path)
+                element.children.append(child_id)
+
+        return new_id
+
+    def list_components(self) -> list[UIComponentDefinition]:
+        # List reusable components sorted by display name.
+
+        return sorted(self.components.values(), key=lambda component: component.name.lower())
+
+    def get_component_display_name(self, component_id: str) -> str:
+        # Resolve display name for a known component id.
+
+        component = self.components.get(component_id)
+        if component is None:
+            return "Unknown"
+        return component.name
+
+    def get_component_binding(self, node_id: str) -> tuple[str, str, bool] | None:
+        # Return component linkage for a node as (component_id, component_name, is_instance_root).
+
+        node = self.elements.get(node_id)
+        if node is None:
+            return None
+
+        metadata = self._extract_component_metadata(node)
+        if metadata is None:
+            return None
+
+        component_id, instance_root_id, _node_path = metadata
+        if component_id not in self.components:
+            return None
+
+        return component_id, self.components[component_id].name, node_id == instance_root_id
+
+    def rename_component(self, component_id: str, new_name: str) -> None:
+        # Rename one component definition with strict validation.
+
+        component = self.components.get(component_id)
+        if component is None:
+            raise ValueError("Component does not exist.")
+
+        normalized_name = new_name.strip()
+        if normalized_name == "":
+            raise ValueError("Component name cannot be empty.")
+
+        component.name = normalized_name
+
+    def get_component_instance_roots(self, component_id: str) -> list[str]:
+        # Return instance root ids for a component in stable root/sibling order.
+
+        if component_id not in self.components:
+            return []
+
+        roots: list[str] = []
+        for root_id in self.roots:
+            if self.component_instances.get(root_id) == component_id:
+                roots.append(root_id)
+
+        for node_id, mapped_component_id in sorted(self.component_instances.items(), key=lambda pair: pair[0]):
+            if mapped_component_id != component_id or node_id in roots:
+                continue
+            if node_id in self.elements:
+                roots.append(node_id)
+
+        return roots
+
+    def convert_to_component(self, element_id: str, component_name: Optional[str] = None) -> str:
+        # Turn an existing subtree into a reusable component and bind this subtree as its first instance.
+
+        if element_id not in self.elements:
+            raise ValueError("Element does not exist.")
+
+        component_id = str(uuid.uuid4())
+        root_node = self.elements[element_id]
+        normalized_name = (component_name or root_node.name or "Component").strip()
+        if normalized_name == "":
+            normalized_name = "Component"
+
+        template = self._strip_component_ids(self._serialize_node_tree(element_id))
+        self.components[component_id] = UIComponentDefinition(id=component_id, name=normalized_name, template=template)
+        self.component_instances[element_id] = component_id
+
+        def annotate(node_id: str, path: str) -> None:
+            node = self.elements[node_id]
+            self._set_component_metadata(node, component_id, element_id, path)
+            for index, child_id in enumerate(node.children):
+                child_path = str(index) if path == "" else f"{path}/{index}"
+                annotate(child_id, child_path)
+
+        annotate(element_id, "")
+        return component_id
+
+    def instantiate_component_after(self, component_id: str, target_id: Optional[str]) -> str:
+        # Insert a new instance of a component as sibling-after target or as root.
+
+        if component_id not in self.components:
+            raise ValueError("Component does not exist.")
+        if target_id is not None and target_id not in self.elements:
+            raise ValueError("Target element does not exist.")
+
+        template = self.components[component_id].template
+        new_root_id = self._clone_payload_into_document(template, None, None, "")
+        self.component_instances[new_root_id] = component_id
+
+        def annotate(node_id: str, path: str) -> None:
+            node = self.elements[node_id]
+            self._set_component_metadata(node, component_id, new_root_id, path)
+            for index, child_id in enumerate(node.children):
+                child_path = str(index) if path == "" else f"{path}/{index}"
+                annotate(child_id, child_path)
+
+        annotate(new_root_id, "")
+
+        parent_id = self.get_parent_id(target_id) if target_id is not None else None
+        if parent_id is None:
+            siblings = self.roots
+            insert_index = len(siblings)
+            if target_id is not None:
+                insert_index = siblings.index(target_id) + 1
+            siblings.insert(insert_index, new_root_id)
+            return new_root_id
+
+        siblings = self.elements[parent_id].children
+        target_index = siblings.index(target_id) if target_id is not None else len(siblings) - 1
+        siblings.insert(target_index + 1, new_root_id)
+        return new_root_id
+
+    def sync_component_from_node(self, source_node_id: str) -> int:
+        # Propagate one node edit to all instances of its component and update template payload.
+
+        if source_node_id not in self.elements:
+            return 0
+
+        source = self.elements[source_node_id]
+        metadata = self._extract_component_metadata(source)
+        if metadata is None:
+            return 0
+
+        component_id, _instance_root, node_path = metadata
+        component = self.components.get(component_id)
+        if component is None:
+            return 0
+
+        template_node = component.template
+        if node_path != "":
+            parts = node_path.split("/")
+            for part in parts:
+                try:
+                    index = int(part)
+                except ValueError:
+                    return 0
+                children = template_node.get("children", [])
+                if not isinstance(children, list) or index < 0 or index >= len(children):
+                    return 0
+                child = children[index]
+                if not isinstance(child, dict):
+                    return 0
+                template_node = child
+
+        template_node["type"] = source.element_type
+        template_node["name"] = source.name
+        template_node["x"] = source.x
+        template_node["y"] = source.y
+        template_node["width"] = source.width
+        template_node["height"] = source.height
+        template_node["text"] = source.text
+        template_node["text_alignment"] = source.text_alignment
+        template_node["text_color_override"] = source.text_color_override
+        template_node["text_color"] = source.text_color
+        template_node["background_color_override"] = source.background_color_override
+        template_node["background_color"] = source.background_color
+        template_node["multiline"] = source.multiline
+        template_node["border_color"] = source.border_color
+        template_node["layout"] = source.layout
+        template_node["child_alignment"] = source.child_alignment
+        template_node["spacing"] = source.spacing
+        template_node["padding"] = source.padding_left
+        template_node["padding_left"] = source.padding_left
+        template_node["padding_right"] = source.padding_right
+        template_node["padding_top"] = source.padding_top
+        template_node["padding_bottom"] = source.padding_bottom
+        template_node["width_mode"] = source.width_mode
+        template_node["height_mode"] = source.height_mode
+        template_node["scroll_vertical"] = source.scroll_vertical
+        template_node["scroll_horizontal"] = source.scroll_horizontal
+        props_copy: dict[str, object] = {}
+        for key, value in source.props.items():
+            if key.startswith("__component_"):
+                continue
+            props_copy[key] = value
+        template_node["props"] = props_copy
+
+        updated = 0
+
+        def apply_to_instance(node: UIElement) -> None:
+            nonlocal updated
+            node.element_type = source.element_type
+            node.name = source.name
+            node.x = source.x
+            node.y = source.y
+            node.width = source.width
+            node.height = source.height
+            node.text = source.text
+            node.text_alignment = source.text_alignment
+            node.text_color_override = source.text_color_override
+            node.text_color = source.text_color
+            node.background_color_override = source.background_color_override
+            node.background_color = source.background_color
+            node.multiline = source.multiline
+            node.border_color = source.border_color
+            node.layout = source.layout
+            node.child_alignment = source.child_alignment
+            node.spacing = source.spacing
+            node.padding_left = source.padding_left
+            node.padding_right = source.padding_right
+            node.padding_top = source.padding_top
+            node.padding_bottom = source.padding_bottom
+            node.width_mode = source.width_mode
+            node.height_mode = source.height_mode
+            node.scroll_vertical = source.scroll_vertical
+            node.scroll_horizontal = source.scroll_horizontal
+            preserved: dict[str, object] = {}
+            for key, value in node.props.items():
+                if key.startswith("__component_"):
+                    preserved[key] = value
+            node.props = dict(props_copy)
+            node.props.update(preserved)
+            updated += 1
+
+        for node in self.elements.values():
+            node_metadata = self._extract_component_metadata(node)
+            if node_metadata is None:
+                continue
+            peer_component_id, _peer_instance_root, peer_path = node_metadata
+            if peer_component_id != component_id or peer_path != node_path:
+                continue
+            if node.id == source_node_id:
+                continue
+            apply_to_instance(node)
+
+        return updated
 
     def add_element(self, element_type: str, parent_id: Optional[str]) -> UIElement:
         # Create and attach an element under a valid parent or the root scene.
@@ -98,7 +517,7 @@ class UIDocument:
         identifier = str(uuid.uuid4())
         label = f"{element_type}_{len(self.elements) + 1}"
         default_text = ""
-        if element_type in {"Window", "Label", "Button", "Toggle", "TextInput"}:
+        if element_type in {"Window", "Label", "Button", "ButtonWithLabel", "Toggle", "ToggleWithLabel", "TextInput", "InputWithLabel"}:
             default_text = label
 
         element = UIElement(
@@ -130,9 +549,20 @@ class UIDocument:
         if element_id in self.roots:
             self.roots.remove(element_id)
 
+        removed_instance_roots: list[str] = []
+        if element_id in self.component_instances:
+            removed_instance_roots.append(element_id)
+
         subtree = self._collect_subtree_ids(element_id)
         for node_id in subtree:
+            if node_id in self.component_instances and node_id not in removed_instance_roots:
+                removed_instance_roots.append(node_id)
             del self.elements[node_id]
+
+        for instance_root_id in removed_instance_roots:
+            self.component_instances.pop(instance_root_id, None)
+
+        self._prune_unreferenced_components()
 
     def move_layer(self, element_id: str, direction: int) -> bool:
         # Reorder an element among siblings to control draw/order layering.
@@ -257,10 +687,28 @@ class UIDocument:
                 "children": [serialize(child) for child in element.children],
             }
 
-        return {
+        payload = {
             "schemaVersion": "1.0.0",
             "roots": [serialize(node_id) for node_id in self.roots],
         }
+        if self.components:
+            payload["components"] = [
+                {
+                    "id": component.id,
+                    "name": component.name,
+                    "template": component.template,
+                }
+                for component in self.list_components()
+            ]
+        if self.component_instances:
+            payload["component_instances"] = [
+                {
+                    "root_id": root_id,
+                    "component_id": component_id,
+                }
+                for root_id, component_id in sorted(self.component_instances.items(), key=lambda pair: pair[0])
+            ]
+        return payload
 
     def from_dict(self, payload: dict) -> None:
         # Load external snapshot and rebuild a validated local tree.
@@ -409,6 +857,63 @@ class UIDocument:
 
         self.elements = new_elements
         self.roots = new_roots
+        self.components = {}
+        self.component_instances = {}
+
+        components_payload = payload.get("components", [])
+        if isinstance(components_payload, list):
+            for item in components_payload:
+                if not isinstance(item, dict):
+                    continue
+                component_id = str(item.get("id", "")).strip()
+                name = str(item.get("name", "")).strip()
+                template = item.get("template", {})
+                if component_id == "" or name == "" or not isinstance(template, dict):
+                    continue
+                self.components[component_id] = UIComponentDefinition(
+                    id=component_id,
+                    name=name,
+                    template=self._strip_component_ids(template),
+                )
+
+        instances_payload = payload.get("component_instances", [])
+        if isinstance(instances_payload, list):
+            for item in instances_payload:
+                if not isinstance(item, dict):
+                    continue
+                root_id = str(item.get("root_id", "")).strip()
+                component_id = str(item.get("component_id", "")).strip()
+                if root_id == "" or component_id == "":
+                    continue
+                if root_id not in self.elements or component_id not in self.components:
+                    continue
+                self.component_instances[root_id] = component_id
+
+        for instance_root_id, component_id in list(self.component_instances.items()):
+            if instance_root_id not in self.elements:
+                self.component_instances.pop(instance_root_id, None)
+                continue
+
+            def annotate(node_id: str, path: str) -> None:
+                if node_id not in self.elements:
+                    return
+                node = self.elements[node_id]
+                self._set_component_metadata(node, component_id, instance_root_id, path)
+                for index, child_id in enumerate(node.children):
+                    child_path = str(index) if path == "" else f"{path}/{index}"
+                    annotate(child_id, child_path)
+
+            annotate(instance_root_id, "")
+
+        self._prune_unreferenced_components()
+
+    def _prune_unreferenced_components(self) -> None:
+        # Drop component definitions with no live instance roots.
+
+        referenced = set(self.component_instances.values())
+        stale = [component_id for component_id in self.components if component_id not in referenced]
+        for component_id in stale:
+            self.components.pop(component_id, None)
 
     def save_to_file(self, file_path: Path) -> None:
         # Serialize document to JSON file and track path for future saves.

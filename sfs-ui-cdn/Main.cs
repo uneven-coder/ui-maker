@@ -340,6 +340,18 @@ namespace cdnui
             if (!_server.HasActiveClient || _previewHolder == null || !TryGetPreviewCaptureRect(out var captureRect))
                 return;
 
+            // Force UI layout to settle before extracting authoritative rects.
+            Canvas.ForceUpdateCanvases();
+            if (_previewHolder.transform is RectTransform holderRect)
+                LayoutRebuilder.ForceRebuildLayoutImmediate(holderRect);
+            for (var i = 0; i < _windowRects.Count; i++)
+            {
+                var windowRect = _windowRects[i];
+                if (windowRect != null)
+                    LayoutRebuilder.ForceRebuildLayoutImmediate(windowRect);
+            }
+            Canvas.ForceUpdateCanvases();
+
             var nodes = new JArray();
             var skippedCount = 0;
             foreach (var pair in _resolvedNodeRects)
@@ -536,6 +548,7 @@ namespace cdnui
 
             var id = GetRequiredString(node, "id");
             var type = GetRequiredString(node, "type");
+            var isComponentPreviewHost = string.Equals(id, "component_preview_host", StringComparison.Ordinal);
             var x = GetOptionalInt(node, "x", 0);
             var y = GetOptionalInt(node, "y", 0);
             var width = Mathf.Clamp(GetRequiredInt(node, "width"), 1, 50000);
@@ -543,6 +556,9 @@ namespace cdnui
             var text = GetRequiredString(node, "text");
             var nodeName = GetRequiredString(node, "name");
             var renderedText = string.IsNullOrWhiteSpace(text) ? nodeName : text;
+            var labelText = GetOptionalPropString(node, "label_text", renderedText);
+            var controlText = GetOptionalPropString(node, "control_text", renderedText);
+            var labelDirection = GetLabelDirection(node, "Top");
             var pathSegment = SanitizePathSegment(nodeName);
             var pathKey = string.IsNullOrWhiteSpace(parentPath)
                 ? $"{pathSegment}[{Mathf.Max(0, siblingIndex)}]"
@@ -587,7 +603,22 @@ namespace cdnui
                     var layoutType = ParseLayoutDirection(layoutDirection);
                     window.CreateLayoutGroup(layoutType, childAlignment: ParseTextAnchor(childAlignment), spacing: spacing, padding: new RectOffset(paddingLeft, paddingRight, paddingTop, paddingBottom), disableChildSizeControl: true);
                     DisableContentSizeFitter(window.ChildrenHolder);
-                    ApplyScrolling(window.ChildrenHolder, scrollVertical, scrollHorizontal);
+                    ApplyScrolling(window, window.ChildrenHolder, scrollVertical, scrollHorizontal);
+                    childParent = window;
+                    renderedElement = window.gameObject.transform;
+                    renderedInstance = window;
+                    if (window.rectTransform != null)
+                        _windowRects.Add(window.rectTransform);
+                    break;
+                }
+                case "ClosableWindow":
+                {
+                    var window = Builder.CreateWindow(parent, DeterministicId(id), resolvedWidth, resolvedHeight, x, y, draggable: false, savePosition: false, titleText: renderedText);
+
+                    var layoutType = ParseLayoutDirection(layoutDirection);
+                    window.CreateLayoutGroup(layoutType, childAlignment: ParseTextAnchor(childAlignment), spacing: spacing, padding: new RectOffset(paddingLeft, paddingRight, paddingTop, paddingBottom), disableChildSizeControl: true);
+                    DisableContentSizeFitter(window.ChildrenHolder);
+                    ApplyScrolling(window, window.ChildrenHolder, scrollVertical, scrollHorizontal);
                     childParent = window;
                     renderedElement = window.gameObject.transform;
                     renderedInstance = window;
@@ -601,7 +632,7 @@ namespace cdnui
                     container.Size = new Vector2(resolvedWidth, resolvedHeight);
                     DisableContentSizeFitter(container.gameObject.transform);
                     container.CreateLayoutGroup(ParseLayoutDirection(layoutDirection), ParseTextAnchor(childAlignment), spacing, new RectOffset(paddingLeft, paddingRight, paddingTop, paddingBottom), true);
-                    ApplyScrolling(container.gameObject.transform, scrollVertical, scrollHorizontal);
+                    ApplyScrolling(container, container.gameObject.transform, scrollVertical, scrollHorizontal);
                     childParent = container.gameObject.transform;
                     renderedElement = container.gameObject.transform;
                     renderedInstance = container;
@@ -612,7 +643,7 @@ namespace cdnui
                     var box = Builder.CreateBox(parent, resolvedWidth, resolvedHeight, x, y, opacity: 0.35f);
                     DisableContentSizeFitter(box.gameObject.transform);
                     box.CreateLayoutGroup(ParseLayoutDirection(layoutDirection), ParseTextAnchor(childAlignment), spacing, new RectOffset(paddingLeft, paddingRight, paddingTop, paddingBottom), true);
-                    ApplyScrolling(box.gameObject.transform, scrollVertical, scrollHorizontal);
+                    ApplyScrolling(box, box.gameObject.transform, scrollVertical, scrollHorizontal);
                     childParent = box.gameObject.transform;
                     renderedElement = box.gameObject.transform;
                     renderedInstance = box;
@@ -634,12 +665,92 @@ namespace cdnui
                     renderedInstance = button;
                     break;
                 }
+                case "ButtonWithLabel":
+                {
+                    var holder = Builder.CreateContainer(parent, x, y);
+                    holder.Size = new Vector2(resolvedWidth, resolvedHeight);
+                    DisableContentSizeFitter(holder.gameObject.transform);
+                    var horizontal = string.Equals(labelDirection, "Left", StringComparison.OrdinalIgnoreCase) || string.Equals(labelDirection, "Right", StringComparison.OrdinalIgnoreCase);
+                    var reverse = string.Equals(labelDirection, "Right", StringComparison.OrdinalIgnoreCase) || string.Equals(labelDirection, "Bottom", StringComparison.OrdinalIgnoreCase);
+                    holder.CreateLayoutGroup(horizontal ? SFS.UI.ModGUI.Type.Horizontal : SFS.UI.ModGUI.Type.Vertical, horizontal ? TextAnchor.MiddleLeft : TextAnchor.UpperLeft, Mathf.Max(0, spacing), new RectOffset(paddingLeft, paddingRight, paddingTop, paddingBottom), true);
+                    var labelHeight = Mathf.Clamp(resolvedHeight / 3, 18, resolvedHeight);
+                    var buttonHeight = Mathf.Max(18, resolvedHeight - labelHeight - Mathf.Max(0, spacing));
+                    if (horizontal)
+                    {
+                        var labelWidth = Mathf.Clamp(resolvedWidth / 2, 20, Mathf.Max(20, resolvedWidth));
+                        var controlWidth = Mathf.Max(20, resolvedWidth - labelWidth - Mathf.Max(0, spacing));
+                        if (reverse)
+                        {
+                            Builder.CreateButton(holder.gameObject.transform, controlWidth, Mathf.Max(20, resolvedHeight), 0, 0, null, controlText);
+                            Builder.CreateLabel(holder.gameObject.transform, labelWidth, Mathf.Max(20, resolvedHeight), 0, 0, labelText);
+                        }
+                        else
+                        {
+                            Builder.CreateLabel(holder.gameObject.transform, labelWidth, Mathf.Max(20, resolvedHeight), 0, 0, labelText);
+                            Builder.CreateButton(holder.gameObject.transform, controlWidth, Mathf.Max(20, resolvedHeight), 0, 0, null, controlText);
+                        }
+                    }
+                    else if (reverse)
+                    {
+                        Builder.CreateButton(holder.gameObject.transform, resolvedWidth, buttonHeight, 0, 0, null, controlText);
+                        Builder.CreateLabel(holder.gameObject.transform, resolvedWidth, labelHeight, 0, 0, labelText);
+                    }
+                    else
+                    {
+                        Builder.CreateLabel(holder.gameObject.transform, resolvedWidth, labelHeight, 0, 0, labelText);
+                        Builder.CreateButton(holder.gameObject.transform, resolvedWidth, buttonHeight, 0, 0, null, controlText);
+                    }
+                    childParent = holder.gameObject.transform;
+                    renderedElement = holder.gameObject.transform;
+                    renderedInstance = holder;
+                    break;
+                }
                 case "TextInput":
                 {
                     var input = Builder.CreateTextInput(parent, resolvedWidth, resolvedHeight, x, y, renderedText, null);
                     childParent = input.gameObject.transform;
                     renderedElement = input.gameObject.transform;
                     renderedInstance = input;
+                    break;
+                }
+                case "InputWithLabel":
+                {
+                    var holder = Builder.CreateContainer(parent, x, y);
+                    holder.Size = new Vector2(resolvedWidth, resolvedHeight);
+                    DisableContentSizeFitter(holder.gameObject.transform);
+                    var horizontal = string.Equals(labelDirection, "Left", StringComparison.OrdinalIgnoreCase) || string.Equals(labelDirection, "Right", StringComparison.OrdinalIgnoreCase);
+                    var reverse = string.Equals(labelDirection, "Right", StringComparison.OrdinalIgnoreCase) || string.Equals(labelDirection, "Bottom", StringComparison.OrdinalIgnoreCase);
+                    holder.CreateLayoutGroup(horizontal ? SFS.UI.ModGUI.Type.Horizontal : SFS.UI.ModGUI.Type.Vertical, horizontal ? TextAnchor.MiddleLeft : TextAnchor.UpperLeft, Mathf.Max(0, spacing), new RectOffset(paddingLeft, paddingRight, paddingTop, paddingBottom), true);
+                    var labelHeight = Mathf.Clamp(resolvedHeight / 3, 18, resolvedHeight);
+                    var inputHeight = Mathf.Max(18, resolvedHeight - labelHeight - Mathf.Max(0, spacing));
+                    if (horizontal)
+                    {
+                        var labelWidth = Mathf.Clamp(resolvedWidth / 2, 20, Mathf.Max(20, resolvedWidth));
+                        var controlWidth = Mathf.Max(20, resolvedWidth - labelWidth - Mathf.Max(0, spacing));
+                        if (reverse)
+                        {
+                            Builder.CreateTextInput(holder.gameObject.transform, controlWidth, Mathf.Max(20, resolvedHeight), 0, 0, controlText, null);
+                            Builder.CreateLabel(holder.gameObject.transform, labelWidth, Mathf.Max(20, resolvedHeight), 0, 0, labelText);
+                        }
+                        else
+                        {
+                            Builder.CreateLabel(holder.gameObject.transform, labelWidth, Mathf.Max(20, resolvedHeight), 0, 0, labelText);
+                            Builder.CreateTextInput(holder.gameObject.transform, controlWidth, Mathf.Max(20, resolvedHeight), 0, 0, controlText, null);
+                        }
+                    }
+                    else if (reverse)
+                    {
+                        Builder.CreateTextInput(holder.gameObject.transform, resolvedWidth, inputHeight, 0, 0, controlText, null);
+                        Builder.CreateLabel(holder.gameObject.transform, resolvedWidth, labelHeight, 0, 0, labelText);
+                    }
+                    else
+                    {
+                        Builder.CreateLabel(holder.gameObject.transform, resolvedWidth, labelHeight, 0, 0, labelText);
+                        Builder.CreateTextInput(holder.gameObject.transform, resolvedWidth, inputHeight, 0, 0, controlText, null);
+                    }
+                    childParent = holder.gameObject.transform;
+                    renderedElement = holder.gameObject.transform;
+                    renderedInstance = holder;
                     break;
                 }
                 case "Toggle":
@@ -649,6 +760,46 @@ namespace cdnui
                     childParent = toggle.gameObject.transform;
                     renderedElement = toggle.gameObject.transform;
                     renderedInstance = toggle;
+                    break;
+                }
+                case "ToggleWithLabel":
+                {
+                    var holder = Builder.CreateContainer(parent, x, y);
+                    holder.Size = new Vector2(resolvedWidth, resolvedHeight);
+                    DisableContentSizeFitter(holder.gameObject.transform);
+                    var horizontal = string.Equals(labelDirection, "Left", StringComparison.OrdinalIgnoreCase) || string.Equals(labelDirection, "Right", StringComparison.OrdinalIgnoreCase);
+                    var reverse = string.Equals(labelDirection, "Right", StringComparison.OrdinalIgnoreCase) || string.Equals(labelDirection, "Bottom", StringComparison.OrdinalIgnoreCase);
+                    holder.CreateLayoutGroup(horizontal ? SFS.UI.ModGUI.Type.Horizontal : SFS.UI.ModGUI.Type.Vertical, horizontal ? TextAnchor.MiddleLeft : TextAnchor.UpperLeft, Mathf.Max(0, spacing), new RectOffset(paddingLeft, paddingRight, paddingTop, paddingBottom), true);
+                    var localState = false;
+                    if (horizontal)
+                    {
+                        var labelWidth = Mathf.Clamp(resolvedWidth / 2, 20, Mathf.Max(20, resolvedWidth));
+                        var toggleHostWidth = Mathf.Max(20, resolvedWidth - labelWidth - Mathf.Max(0, spacing));
+                        if (reverse)
+                        {
+                            Builder.CreateToggle(holder.gameObject.transform, () => localState, 0, 0, () => localState = !localState);
+                            Builder.CreateLabel(holder.gameObject.transform, labelWidth, Mathf.Max(20, resolvedHeight), 0, 0, labelText);
+                        }
+                        else
+                        {
+                            Builder.CreateLabel(holder.gameObject.transform, labelWidth, Mathf.Max(20, resolvedHeight), 0, 0, labelText);
+                            Builder.CreateToggle(holder.gameObject.transform, () => localState, 0, 0, () => localState = !localState);
+                        }
+                        _ = toggleHostWidth;
+                    }
+                    else if (reverse)
+                    {
+                        Builder.CreateToggle(holder.gameObject.transform, () => localState, 0, 0, () => localState = !localState);
+                        Builder.CreateLabel(holder.gameObject.transform, resolvedWidth, Mathf.Clamp(resolvedHeight / 3, 18, resolvedHeight), 0, 0, labelText);
+                    }
+                    else
+                    {
+                        Builder.CreateLabel(holder.gameObject.transform, resolvedWidth, Mathf.Clamp(resolvedHeight / 3, 18, resolvedHeight), 0, 0, labelText);
+                        Builder.CreateToggle(holder.gameObject.transform, () => localState, 0, 0, () => localState = !localState);
+                    }
+                    childParent = holder.gameObject.transform;
+                    renderedElement = holder.gameObject.transform;
+                    renderedInstance = holder;
                     break;
                 }
                 case "Slider":
@@ -685,7 +836,7 @@ namespace cdnui
                     throw new InvalidOperationException($"Unsupported node type in snapshot: {type}");
             }
 
-            ApplyVisualStyle(renderedInstance, renderedElement, type, textAlignment, multiline, textColorOverride, textColor, backgroundColorOverride, backgroundColor, borderColor);
+            ApplyVisualStyle(renderedInstance, renderedElement, type, textAlignment, multiline, textColorOverride, textColor, backgroundColorOverride, backgroundColor, borderColor, isComponentPreviewHost);
 
             if (renderedElement is RectTransform elementRect)
                 _resolvedNodeRects[id] = elementRect;
@@ -992,6 +1143,33 @@ namespace cdnui
             return token.Type == JTokenType.String ? token.Value<string>() ?? defaultValue : token.ToString();
         }
 
+        private static string GetLabelDirection(JObject node, string defaultValue)
+        {
+            // Read labeled-control direction from props with strict known values.
+
+            var props = node["props"] as JObject;
+            var raw = props?["label_direction"]?.ToString() ?? defaultValue;
+            var normalized = (raw ?? string.Empty).Trim();
+            if (string.Equals(normalized, "Top", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(normalized, "Bottom", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(normalized, "Left", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(normalized, "Right", StringComparison.OrdinalIgnoreCase))
+            {
+                return normalized;
+            }
+
+            return defaultValue;
+        }
+
+        private static string GetOptionalPropString(JObject node, string propName, string defaultValue)
+        {
+            // Read optional string props used by composite labeled controls.
+
+            var props = node["props"] as JObject;
+            var raw = props?[propName]?.ToString();
+            return string.IsNullOrWhiteSpace(raw) ? defaultValue : raw;
+        }
+
         private static void DisableContentSizeFitter(Transform transform)
         {
             // Prevent fitters from collapsing dynamic full-size layout elements.
@@ -1005,19 +1183,40 @@ namespace cdnui
             fitter.enabled = false;
         }
 
-        private static void ApplyScrolling(Transform transform, bool vertical, bool horizontal)
+        private static void ApplyScrolling(object element, Transform transform, bool vertical, bool horizontal)
         {
             // Enable scrolling when the target supports SFS scroll behavior.
 
-            var scrollElement = transform.GetComponent("ScrollElement");
-            if (scrollElement != null)
+            if (element != null)
             {
-                TrySetBoolMember(scrollElement, "vertical", vertical);
-                TrySetBoolMember(scrollElement, "horizontal", horizontal);
-                TrySetBoolMember(scrollElement, "Vertical", vertical);
-                TrySetBoolMember(scrollElement, "Horizontal", horizontal);
-                TrySetBoolMember(scrollElement, "scrollVertical", vertical);
-                TrySetBoolMember(scrollElement, "scrollHorizontal", horizontal);
+                TrySetBoolMember(element, "scrollVertical", vertical);
+                TrySetBoolMember(element, "scrollHorizontal", horizontal);
+                TrySetBoolMember(element, "ScrollVertical", vertical);
+                TrySetBoolMember(element, "ScrollHorizontal", horizontal);
+                TrySetBoolMember(element, "vertical", vertical);
+                TrySetBoolMember(element, "horizontal", horizontal);
+                TrySetBoolMember(element, "Vertical", vertical);
+                TrySetBoolMember(element, "Horizontal", horizontal);
+            }
+
+            if (transform == null)
+                return;
+
+            var scrollElements = transform.GetComponentsInChildren<Component>(true);
+            foreach (var component in scrollElements)
+            {
+                if (component == null)
+                    continue;
+
+                if (!component.GetType().Name.Contains("Scroll", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                TrySetBoolMember(component, "vertical", vertical);
+                TrySetBoolMember(component, "horizontal", horizontal);
+                TrySetBoolMember(component, "Vertical", vertical);
+                TrySetBoolMember(component, "Horizontal", horizontal);
+                TrySetBoolMember(component, "scrollVertical", vertical);
+                TrySetBoolMember(component, "scrollHorizontal", horizontal);
             }
 
             var scrollRect = transform.GetComponent<ScrollRect>() ?? transform.GetComponentInChildren<ScrollRect>(true);
@@ -1138,7 +1337,7 @@ namespace cdnui
             };
         }
 
-        private static void ApplyVisualStyle(object element, Transform renderedElement, string elementType, string textAlignment, bool multiline, bool textColorOverride, string textColorHex, bool backgroundColorOverride, string backgroundColorHex, string borderColorHex)
+        private static void ApplyVisualStyle(object element, Transform renderedElement, string elementType, string textAlignment, bool multiline, bool textColorOverride, string textColorHex, bool backgroundColorOverride, string backgroundColorHex, string borderColorHex, bool isComponentPreviewHost)
         {
             // Apply lightweight styling and text settings from snapshot fields.
 
@@ -1149,17 +1348,34 @@ namespace cdnui
             }
 
             if (backgroundColorOverride && TryParseColor(backgroundColorHex, out var backgroundColor))
-                ApplyBackgroundColor(element, renderedElement, elementType, backgroundColor);
+                ApplyBackgroundColor(element, renderedElement, elementType, backgroundColor, applyToChildren: !isComponentPreviewHost, forceContainerSurface: isComponentPreviewHost);
 
             TrySetEnumProperty(element, "TextAlignment", textAlignment);
         }
 
-        private static void ApplyBackgroundColor(object element, Transform renderedElement, string elementType, Color backgroundColor)
+        private static void ApplyBackgroundColor(object element, Transform renderedElement, string elementType, Color backgroundColor, bool applyToChildren, bool forceContainerSurface)
         {
             // Route background color to element-specific channels so text colors stay independent.
 
             ApplyElementBackgroundChannels(element, elementType, backgroundColor);
-            ApplyBackgroundColorToChildren(renderedElement, backgroundColor);
+            if (forceContainerSurface)
+                EnsureContainerBackgroundSurface(renderedElement, backgroundColor);
+
+            if (applyToChildren)
+                ApplyBackgroundColorToChildren(renderedElement, backgroundColor);
+        }
+
+        private static void EnsureContainerBackgroundSurface(Transform renderedElement, Color backgroundColor)
+        {
+            // Ensure preview host containers always have a drawable image surface.
+
+            if (renderedElement == null)
+                return;
+
+            var image = renderedElement.GetComponent<UnityEngine.UI.Image>()
+                ?? renderedElement.gameObject.AddComponent<UnityEngine.UI.Image>();
+            image.color = backgroundColor;
+            image.raycastTarget = false;
         }
 
         private static void ApplyElementBackgroundChannels(object element, string elementType, Color backgroundColor)

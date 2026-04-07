@@ -120,11 +120,14 @@ class OrchestratorPanel(wx.Panel):
 class DesignerPanel(wx.Panel):
     # Provide layered creator workspace plus realtime bridge visualizer controls.
 
-    ELEMENT_TYPES = ["Window", "ClosableWindow", "Container", "Box", "Label", "Button", "TextInput", "Toggle", "Slider", "Separator", "Space"]
+    ELEMENT_TYPES = ["Window", "ClosableWindow", "Container", "Box", "Label", "Button", "ButtonWithLabel", "TextInput", "InputWithLabel", "Toggle", "ToggleWithLabel", "Slider", "Separator", "Space"]
     CONTAINER_TYPES = {"Window", "ClosableWindow", "Container", "Box"}
-    TEXT_TYPES = {"Window", "ClosableWindow", "Label", "Button", "TextInput", "Toggle"}
-    TEXT_COLOR_OVERRIDE_SUPPORTED_TYPES = {"Window", "ClosableWindow", "Label", "Button"}
-    BACKGROUND_COLOR_OVERRIDE_SUPPORTED_TYPES = {"Window", "ClosableWindow", "Box", "TextInput"}
+    TEXT_TYPES = {"Window", "ClosableWindow", "Label", "Button", "ButtonWithLabel", "TextInput", "InputWithLabel", "Toggle", "ToggleWithLabel"}
+    TEXT_COLOR_OVERRIDE_SUPPORTED_TYPES = {"Window", "ClosableWindow", "Label", "Button", "ButtonWithLabel"}
+    BACKGROUND_COLOR_OVERRIDE_SUPPORTED_TYPES = {"Window", "ClosableWindow", "Box", "TextInput", "InputWithLabel"}
+    LABELED_TYPES = {"ButtonWithLabel", "InputWithLabel", "ToggleWithLabel"}
+    LABELED_WITH_CONTROL_TEXT_TYPES = {"ButtonWithLabel", "InputWithLabel"}
+    LABEL_DIRECTION_CHOICES = ["Top", "Bottom", "Left", "Right"]
     ALIGNMENT_CHOICES = [
         "UpperLeft",
         "UpperCenter",
@@ -170,7 +173,11 @@ class DesignerPanel(wx.Panel):
         self._generated_test_restart_attempted = False
         self._pending_generated_retry_source: Optional[str] = None
         self._latest_layout_payload: Optional[dict] = None
+        self._latest_preview_bitmap: Optional[wx.Bitmap] = None
         self._snapshot_sync_delay_ms = 120
+        self._bridge_sync_enabled = True
+        self._scope_root_ids: Optional[list[str]] = None
+        self._scope_hide_window_nodes = False
         self._build_ui()
         self._refresh_project_status()
         self._set_creator_enabled(False)
@@ -179,6 +186,66 @@ class DesignerPanel(wx.Panel):
         # Stop bridge session when the app is closing.
 
         self._bridge.disconnect()
+
+    def get_document(self) -> UIDocument:
+        # Expose backing document reference for panels that intentionally share the same editor state.
+
+        return self._document
+
+    def use_document(self, document: UIDocument, select_id: Optional[str] = None) -> None:
+        # Rebind this editor instance to an external shared document.
+
+        self._document = document
+        self.canvas._document = document
+        if select_id is None and document.roots:
+            select_id = document.roots[0]
+        self._refresh_all(select_id=select_id, sync_bridge=False)
+        self._set_creator_enabled(True)
+
+    def set_bridge_sync_enabled(self, enabled: bool) -> None:
+        # Toggle websocket sync for this editor instance while keeping local editing active.
+
+        self._bridge_sync_enabled = enabled
+        if not enabled:
+            self._bridge.disconnect()
+
+    def set_scope(self, root_ids: Optional[list[str]], hide_window_nodes: bool = False, select_id: Optional[str] = None) -> None:
+        # Limit tree/canvas to selected roots for focused component editing workflows.
+
+        self._scope_root_ids = list(root_ids) if root_ids is not None else None
+        self._scope_hide_window_nodes = hide_window_nodes
+        self.canvas.set_scope(self._scope_root_ids, hide_window_nodes=hide_window_nodes)
+        if select_id is None:
+            select_id = self._first_visible_node_in_scope()
+        self._refresh_all(select_id=select_id, sync_bridge=False)
+
+    def _iter_scope_roots(self) -> list[str]:
+        # Resolve active root ids for scoped tree rendering.
+
+        if self._scope_root_ids is None:
+            return [root_id for root_id in self._document.roots if root_id in self._document.elements]
+        return [root_id for root_id in self._scope_root_ids if root_id in self._document.elements]
+
+    def _first_visible_node_in_scope(self) -> Optional[str]:
+        # Pick first node visible in current scope; skips window wrappers when hidden.
+
+        def first_non_window(node_id: str) -> Optional[str]:
+            if node_id not in self._document.elements:
+                return None
+            node = self._document.elements[node_id]
+            if not (self._scope_hide_window_nodes and node.element_type in {"Window", "ClosableWindow"}):
+                return node_id
+            for child_id in node.children:
+                found = first_non_window(child_id)
+                if found is not None:
+                    return found
+            return None
+
+        for root_id in self._iter_scope_roots():
+            found = first_non_window(root_id)
+            if found is not None:
+                return found
+        return None
 
     def _build_ui(self) -> None:
         # Construct creator and visualizer workspace sections.
@@ -242,6 +309,8 @@ class DesignerPanel(wx.Panel):
 
         self.field_name = wx.TextCtrl(properties_panel, style=wx.TE_PROCESS_ENTER)
         self.field_text = wx.TextCtrl(properties_panel, style=wx.TE_PROCESS_ENTER)
+        self.field_label_text = wx.TextCtrl(properties_panel, style=wx.TE_PROCESS_ENTER)
+        self.field_control_text = wx.TextCtrl(properties_panel, style=wx.TE_PROCESS_ENTER)
         self.field_text_alignment = wx.Choice(properties_panel, choices=self.TEXT_ALIGNMENT_CHOICES)
         self.field_text_alignment.SetSelection(0)
         self.field_text_color_override = wx.CheckBox(properties_panel, label="Enable Override")
@@ -289,10 +358,14 @@ class DesignerPanel(wx.Panel):
         self.field_height_mode.SetSelection(0)
         self.field_scroll_vertical = wx.CheckBox(properties_panel, label="Scroll Vertical")
         self.field_scroll_horizontal = wx.CheckBox(properties_panel, label="Scroll Horizontal")
+        self.field_label_direction = wx.Choice(properties_panel, choices=self.LABEL_DIRECTION_CHOICES)
+        self.field_label_direction.SetSelection(0)
 
         self._general_rows: dict[str, tuple[wx.StaticText, wx.Window]] = {}
         self._add_general_row(properties_panel, properties_sizer, "name", "Name", self.field_name)
         self._add_general_row(properties_panel, properties_sizer, "text", "Text", self.field_text)
+        self._add_general_row(properties_panel, properties_sizer, "label_text", "Label Text", self.field_label_text)
+        self._add_general_row(properties_panel, properties_sizer, "control_text", "Control Text", self.field_control_text)
         self._add_general_row(properties_panel, properties_sizer, "text_alignment", "Text Alignment", self.field_text_alignment)
         self._add_general_row(properties_panel, properties_sizer, "text_override", "Override Text Color", self.field_text_color_override)
         self._add_general_row(properties_panel, properties_sizer, "text_color", "Text Color", self.text_color_row_panel)
@@ -312,6 +385,7 @@ class DesignerPanel(wx.Panel):
         self._add_general_row(properties_panel, properties_sizer, "height_mode", "Height Mode", self.field_height_mode)
         self._add_general_row(properties_panel, properties_sizer, "scroll_vertical", "Scroll Vertical", self.field_scroll_vertical)
         self._add_general_row(properties_panel, properties_sizer, "scroll_horizontal", "Scroll Horizontal", self.field_scroll_horizontal)
+        self._add_general_row(properties_panel, properties_sizer, "label_direction", "Label Direction", self.field_label_direction)
         properties_sizer.AddStretchSpacer()
         properties_panel.SetSizer(properties_sizer)
 
@@ -365,6 +439,8 @@ class DesignerPanel(wx.Panel):
 
         self.field_name.Bind(wx.EVT_TEXT, self._on_property_changed)
         self.field_text.Bind(wx.EVT_TEXT, self._on_property_changed)
+        self.field_label_text.Bind(wx.EVT_TEXT, self._on_property_changed)
+        self.field_control_text.Bind(wx.EVT_TEXT, self._on_property_changed)
         self.field_text_alignment.Bind(wx.EVT_CHOICE, self._on_property_changed)
         self.field_text_color_override.Bind(wx.EVT_CHECKBOX, self._on_property_changed)
         self.field_background_color_override.Bind(wx.EVT_CHECKBOX, self._on_property_changed)
@@ -372,8 +448,12 @@ class DesignerPanel(wx.Panel):
         self.field_background_color.Bind(wx.EVT_COLOURPICKER_CHANGED, self._on_property_changed)
         self.field_name.Bind(wx.EVT_TEXT_ENTER, self._on_property_changed)
         self.field_text.Bind(wx.EVT_TEXT_ENTER, self._on_property_changed)
+        self.field_label_text.Bind(wx.EVT_TEXT_ENTER, self._on_property_changed)
+        self.field_control_text.Bind(wx.EVT_TEXT_ENTER, self._on_property_changed)
         self.field_name.Bind(wx.EVT_KILL_FOCUS, self._on_text_field_commit)
         self.field_text.Bind(wx.EVT_KILL_FOCUS, self._on_text_field_commit)
+        self.field_label_text.Bind(wx.EVT_KILL_FOCUS, self._on_text_field_commit)
+        self.field_control_text.Bind(wx.EVT_KILL_FOCUS, self._on_text_field_commit)
         self.field_x.Bind(wx.EVT_SPINCTRL, self._on_property_changed)
         self.field_y.Bind(wx.EVT_SPINCTRL, self._on_property_changed)
         self.field_w.Bind(wx.EVT_SPINCTRL, self._on_width_value_changed)
@@ -398,6 +478,7 @@ class DesignerPanel(wx.Panel):
         self.field_height_mode.Bind(wx.EVT_CHOICE, self._on_property_changed)
         self.field_scroll_vertical.Bind(wx.EVT_CHECKBOX, self._on_property_changed)
         self.field_scroll_horizontal.Bind(wx.EVT_CHECKBOX, self._on_property_changed)
+        self.field_label_direction.Bind(wx.EVT_CHOICE, self._on_property_changed)
 
         self._creator_workspace_panels = (left_panel, right_panel)
         self._creator_controls = (
@@ -437,6 +518,100 @@ class DesignerPanel(wx.Panel):
             submenu.Bind(wx.EVT_MENU, lambda _evt, selected=element_type: on_select(selected), id=item_id)
 
         return submenu
+
+    def _build_component_submenu(self, on_select: Callable[[str], None]) -> wx.Menu:
+        # Build reusable component insertion menu from current document component definitions.
+
+        submenu = wx.Menu()
+        components = self._document.list_components()
+        if not components:
+            disabled_id = wx.NewIdRef()
+            submenu.Append(disabled_id, "No Components")
+            submenu.Enable(disabled_id, False)
+            return submenu
+
+        for component in components:
+            item_id = wx.NewIdRef()
+            submenu.Append(item_id, component.name)
+            submenu.Bind(wx.EVT_MENU, lambda _evt, component_id=component.id: on_select(component_id), id=item_id)
+
+        return submenu
+
+    def list_component_choices(self) -> list[tuple[str, str]]:
+        # Return stable component choices as (id, name) pairs for external UI panels.
+
+        return [(component.id, component.name) for component in self._document.list_components()]
+
+    def get_component_template(self, component_id: str) -> Optional[dict]:
+        # Return component template payload for visual preview panels.
+
+        component = self._document.components.get(component_id)
+        if component is None:
+            return None
+        return dict(component.template)
+
+    def rename_component(self, component_id: str, new_name: str) -> None:
+        # Rename a reusable component definition.
+
+        self._document.rename_component(component_id, new_name)
+
+    def focus_component_for_edit(self, component_id: str) -> bool:
+        # Select first instance root for a component so edits happen in the Creator inspector.
+
+        roots = self._document.get_component_instance_roots(component_id)
+        if not roots:
+            return False
+
+        target_id = roots[0]
+        self._refresh_all(select_id=target_id)
+        return True
+
+    @staticmethod
+    def _ensure_preview_ids(node: dict, path: str) -> dict:
+        # Ensure preview payload nodes have stable IDs required by runtime snapshot parsing.
+
+        copied = dict(node)
+        node_id = str(copied.get("id", "")).strip()
+        if node_id == "":
+            copied["id"] = f"component_preview_{path}"
+
+        children_value = copied.get("children", [])
+        children_out: list[dict] = []
+        if isinstance(children_value, list):
+            for index, child in enumerate(children_value):
+                if not isinstance(child, dict):
+                    continue
+                children_out.append(DesignerPanel._ensure_preview_ids(child, f"{path}_{index}"))
+        copied["children"] = children_out
+        return copied
+
+    def preview_component_in_game(self, template: dict) -> bool:
+        # Push selected component template as snapshot so bridge returns true runtime frame/layout preview.
+
+        if not self._bridge.is_connected:
+            self._ensure_bridge_connected_for_project()
+            if not self._bridge.is_connected:
+                return False
+
+        payload = {
+            "type": "snapshot",
+            "source": "python-ui-maker-component-preview",
+            "payload": {
+                "schemaVersion": "1.0.0",
+                "roots": [self._ensure_preview_ids(template, "root")],
+            },
+        }
+        return self._bridge.send_json(payload)
+
+    def get_latest_bridge_preview_data(self) -> tuple[Optional[wx.Bitmap], Optional[dict]]:
+        # Expose latest runtime frame bitmap and authoritative layout payload for secondary preview surfaces.
+
+        return self._latest_preview_bitmap, self._latest_layout_payload
+
+    def force_snapshot_sync(self) -> None:
+        # Reapply current document snapshot to runtime when returning from alternate preview views.
+
+        self._sync_snapshot_to_bridge(force=True)
 
     def _add_element_by_type(self, element_type: str, parent_id: Optional[str]) -> None:
         # Add element directly from toolbar/context actions while preserving last-used type.
@@ -485,6 +660,10 @@ class DesignerPanel(wx.Panel):
         if target_id is None:
             top_level_submenu = self._build_element_type_submenu(lambda element_type: self._add_element_by_type(element_type, None))
             menu.AppendSubMenu(top_level_submenu, "Add Top-Level")
+
+            component_top_submenu = self._build_component_submenu(lambda component_id: self._insert_component_instance(component_id, None))
+            menu.AppendSubMenu(component_top_submenu, "Add Component")
+
             if self._copied_subtree_payload is not None:
                 menu.AppendSeparator()
                 paste_root_id = wx.NewIdRef()
@@ -498,6 +677,14 @@ class DesignerPanel(wx.Panel):
             child_item = menu.AppendSubMenu(child_submenu, "Add Child")
             is_container = self._document.elements[target_id].element_type in self.CONTAINER_TYPES
             child_item.Enable(is_container)
+
+            component_submenu = self._build_component_submenu(on_select=lambda component_id: self._insert_component_instance(component_id, target_id))
+            menu.AppendSubMenu(component_submenu, "Add Component")
+
+            menu.AppendSeparator()
+            convert_id = wx.NewIdRef()
+            menu.Append(convert_id, "Convert To Component")
+            menu.Bind(wx.EVT_MENU, lambda _evt, node_id=target_id: self._convert_subtree_to_component(node_id), id=convert_id)
 
             menu.AppendSeparator()
             copy_id = wx.NewIdRef()
@@ -515,6 +702,41 @@ class DesignerPanel(wx.Panel):
 
         self.PopupMenu(menu)
         menu.Destroy()
+
+    def _convert_subtree_to_component(self, element_id: str) -> None:
+        # Promote selected subtree to reusable component and keep it as the first live instance.
+
+        if element_id not in self._document.elements:
+            self._error("Selected element no longer exists.")
+            return
+
+        default_name = self._document.elements[element_id].name
+        prompt = wx.TextEntryDialog(self, "Component name", "Convert To Component", default_name)
+        if prompt.ShowModal() != wx.ID_OK:
+            prompt.Destroy()
+            return
+
+        component_name = prompt.GetValue().strip()
+        prompt.Destroy()
+        if component_name == "":
+            self._error("Component name cannot be empty.")
+            return
+
+        try:
+            self._document.convert_to_component(element_id, component_name)
+            self._log(f"Converted subtree to component: {component_name}")
+            self._refresh_all(select_id=element_id)
+        except Exception as ex:
+            self._error(f"Convert to component failed: {ex}")
+
+    def _insert_component_instance(self, component_id: str, target_id: Optional[str]) -> None:
+        # Insert one reusable component instance as sibling-after target or at root.
+
+        try:
+            inserted_id = self._document.instantiate_component_after(component_id, target_id)
+            self._refresh_all(select_id=inserted_id)
+        except Exception as ex:
+            self._error(f"Add component failed: {ex}")
 
     def _on_text_field_commit(self, event: wx.FocusEvent) -> None:
         # Apply text field edits on commit to avoid redraw churn while typing.
@@ -618,6 +840,9 @@ class DesignerPanel(wx.Panel):
     def _ensure_bridge_connected_for_project(self) -> None:
         # Keep bridge connection automatic while a project is active.
 
+        if not self._bridge_sync_enabled:
+            return
+
         if self._bridge.is_connected:
             return
 
@@ -705,7 +930,13 @@ class DesignerPanel(wx.Panel):
 
         relevant = {"name", "width", "height"}
         if node.element_type in self.TEXT_TYPES:
-            relevant.update({"text", "text_alignment", "text_override", "text_color"})
+            relevant.update({"text_alignment", "text_override", "text_color"})
+            if node.element_type in self.LABELED_TYPES:
+                relevant.add("label_text")
+                if node.element_type in self.LABELED_WITH_CONTROL_TEXT_TYPES:
+                    relevant.add("control_text")
+            else:
+                relevant.add("text")
         if node.element_type != "Space":
             relevant.update({"background_override", "background_color", "color_note"})
         if node.element_type in self.CONTAINER_TYPES:
@@ -713,6 +944,8 @@ class DesignerPanel(wx.Panel):
         relevant.update({"width_mode", "height_mode"})
         if node.element_type in self.CONTAINER_TYPES:
             relevant.update({"scroll_vertical", "scroll_horizontal"})
+        if node.element_type in self.LABELED_TYPES:
+            relevant.add("label_direction")
 
         for key, (label, control) in self._general_rows.items():
             visible = key in relevant
@@ -883,7 +1116,7 @@ class DesignerPanel(wx.Panel):
     def _sync_snapshot_to_bridge(self, force: bool = False) -> bool:
         # Keep SFS renderer as the authoritative layout engine for live editing.
 
-        if not self._bridge.is_connected or self._applying_remote_snapshot or self._export_tab_active:
+        if not self._bridge_sync_enabled or not self._bridge.is_connected or self._applying_remote_snapshot or self._export_tab_active:
             return False
 
         payload_obj = {
@@ -1049,6 +1282,9 @@ class DesignerPanel(wx.Panel):
             node.height_mode,
             node.scroll_vertical,
             node.scroll_horizontal,
+            str(node.props.get("label_direction", "")),
+            str(node.props.get("label_text", "")),
+            str(node.props.get("control_text", "")),
         )
         old_name = node.name
         supports_text = node.element_type in self.TEXT_TYPES
@@ -1058,7 +1294,18 @@ class DesignerPanel(wx.Panel):
 
         node.name = self.field_name.GetValue().strip() or node.name
         if supports_text:
-            node.text = self.field_text.GetValue()
+            if node.element_type in self.LABELED_TYPES:
+                label_text = self.field_label_text.GetValue()
+                node.props["label_text"] = label_text
+                node.text = label_text
+                if node.element_type in self.LABELED_WITH_CONTROL_TEXT_TYPES:
+                    node.props["control_text"] = self.field_control_text.GetValue()
+                else:
+                    node.props.pop("control_text", None)
+            else:
+                node.text = self.field_text.GetValue()
+                node.props.pop("label_text", None)
+                node.props.pop("control_text", None)
             node.text_alignment = self.field_text_alignment.GetStringSelection() or "Left"
             node.text_color_override = self.field_text_color_override.GetValue() if supports_text_color_override else False
             if node.text_color_override:
@@ -1084,6 +1331,10 @@ class DesignerPanel(wx.Panel):
         node.height_mode = normalize_size_mode(self.field_height_mode.GetStringSelection() or SIZE_MODE_MANUAL, "height")
         node.scroll_vertical = self.field_scroll_vertical.GetValue()
         node.scroll_horizontal = self.field_scroll_horizontal.GetValue()
+        if node.element_type in self.LABELED_TYPES:
+            node.props["label_direction"] = self.field_label_direction.GetStringSelection() or "Top"
+        else:
+            node.props.pop("label_direction", None)
 
         current_state = (
             node.name,
@@ -1108,9 +1359,14 @@ class DesignerPanel(wx.Panel):
             node.height_mode,
             node.scroll_vertical,
             node.scroll_horizontal,
+            str(node.props.get("label_direction", "")),
+            str(node.props.get("label_text", "")),
+            str(node.props.get("control_text", "")),
         )
         if current_state == previous_state:
             return
+
+        synced_count = self._document.sync_component_from_node(self._selection)
 
         source_control: Optional[wx.Window]
         if _event is None:
@@ -1122,6 +1378,8 @@ class DesignerPanel(wx.Panel):
                 source_control = None
 
         if node.name != old_name:
+            self._rebuild_tree(self._selection)
+        elif synced_count > 0 and source_control is not None and source_control == self.field_name:
             self._rebuild_tree(self._selection)
 
         controls_requiring_ui_refresh = {
@@ -1179,6 +1437,10 @@ class DesignerPanel(wx.Panel):
             self._set_general_property_visibility(node)
             self.field_name.SetValue(node.name)
             self.field_text.SetValue(node.text)
+            label_text_value = str(node.props.get("label_text", node.text))
+            control_text_value = str(node.props.get("control_text", node.text))
+            self.field_label_text.SetValue(label_text_value)
+            self.field_control_text.SetValue(control_text_value)
             text_alignment_index = self.field_text_alignment.FindString(node.text_alignment)
             self.field_text_alignment.SetSelection(text_alignment_index if text_alignment_index != wx.NOT_FOUND else 0)
             self.field_text_color_override.SetValue(node.text_color_override)
@@ -1228,6 +1490,10 @@ class DesignerPanel(wx.Panel):
             self.field_height_mode.SetSelection(height_mode_index if height_mode_index != wx.NOT_FOUND else 0)
             self.field_scroll_vertical.SetValue(node.scroll_vertical)
             self.field_scroll_horizontal.SetValue(node.scroll_horizontal)
+            default_label_direction = "Left" if node.element_type == "ToggleWithLabel" else "Top"
+            label_direction = str(node.props.get("label_direction", default_label_direction))
+            label_direction_index = self.field_label_direction.FindString(label_direction)
+            self.field_label_direction.SetSelection(label_direction_index if label_direction_index != wx.NOT_FOUND else 0)
 
             width_is_manual = node.width_mode == SIZE_MODE_MANUAL
             height_is_manual = node.height_mode == SIZE_MODE_MANUAL
@@ -1254,12 +1520,27 @@ class DesignerPanel(wx.Panel):
 
         def add_node(parent_item: wx.TreeItemId, node_id: str) -> None:
             node = self._document.elements[node_id]
-            item = self.tree.AppendItem(parent_item, f"{node.name} [{node.element_type}]")
+            if self._scope_hide_window_nodes and node.element_type in {"Window", "ClosableWindow"}:
+                for child_id in node.children:
+                    if child_id in self._document.elements:
+                        add_node(parent_item, child_id)
+                return
+
+            label = f"{node.name} [{node.element_type}]"
+            component_binding = self._document.get_component_binding(node_id)
+            if component_binding is not None:
+                _component_id, component_name, is_instance_root = component_binding
+                if is_instance_root:
+                    label += f" [CR:{component_name}]"
+                else:
+                    label += " [♳]"
+
+            item = self.tree.AppendItem(parent_item, label)
             self._tree_item_to_id[item] = node_id
             for child_id in node.children:
                 add_node(item, child_id)
 
-        for node_id in self._document.roots:
+        for node_id in self._iter_scope_roots():
             add_node(root_item, node_id)
 
         self.tree.ExpandAll()
@@ -1604,7 +1885,9 @@ class DesignerPanel(wx.Panel):
             self._error("Frame decode failed: invalid image payload.")
             return
 
-        self.canvas.set_preview_bitmap(wx.Bitmap(image))
+        bitmap = wx.Bitmap(image)
+        self._latest_preview_bitmap = bitmap
+        self.canvas.set_preview_bitmap(bitmap)
 
     def _error(self, message: str) -> None:
         # Show explicit user-facing error without silent fallback behavior.
@@ -1837,6 +2120,268 @@ class ExportPanel(wx.Panel):
             wx.MessageBox(message, "Contract Validation", wx.OK | wx.ICON_ERROR)
 
 
+class ComponentsPanel(wx.Panel):
+    # Reuse the full Designer editor in this tab, scoped by a component selector.
+
+    def __init__(
+        self,
+        parent: wx.Window,
+        config: AppConfig,
+        get_components: Callable[[], list[tuple[str, str]]],
+        get_shared_document: Callable[[], UIDocument],
+        get_component_template: Callable[[str], Optional[dict]],
+        preview_component_in_game: Callable[[dict], bool],
+        get_latest_bridge_preview_data: Callable[[], tuple[Optional[wx.Bitmap], Optional[dict]]],
+    ):
+        super().__init__(parent)
+        self._config = config
+        self._get_components = get_components
+        self._get_shared_document = get_shared_document
+        self._get_component_template = get_component_template
+        self._preview_component_in_game = preview_component_in_game
+        self._get_latest_bridge_preview_data = get_latest_bridge_preview_data
+        self._choices: list[tuple[str, str]] = []
+        self._active_component_id: Optional[str] = None
+        self._is_active = False
+        self._last_preview_signature = ""
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        # Build component selector and embed a full Designer editor below it.
+
+        root = wx.BoxSizer(wx.VERTICAL)
+
+        toolbar = wx.BoxSizer(wx.HORIZONTAL)
+        toolbar.Add(wx.StaticText(self, label="Component"), 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 6)
+        self.component_choice = wx.Choice(self)
+        toolbar.Add(self.component_choice, 1, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 4)
+        self.refresh_button = wx.Button(self, label="Refresh Components")
+        toolbar.Add(self.refresh_button, 0, wx.ALL, 4)
+        toolbar.Add(wx.StaticText(self, label="Host W"), 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 4)
+        self.host_width = wx.SpinCtrl(self, min=0, max=5000, initial=1200)
+        toolbar.Add(self.host_width, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 4)
+        toolbar.Add(wx.StaticText(self, label="Host H"), 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 4)
+        self.host_height = wx.SpinCtrl(self, min=0, max=5000, initial=800)
+        toolbar.Add(self.host_height, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 4)
+        toolbar.Add(wx.StaticText(self, label="Host BG"), 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 4)
+        self.host_background_mode = wx.Choice(self, choices=["Transparent", "Solid"])
+        self.host_background_mode.SetSelection(0)
+        toolbar.Add(self.host_background_mode, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 4)
+        self.host_background_color = wx.ColourPickerCtrl(self, colour=wx.Colour(40, 40, 40))
+        self.host_background_color.Enable(False)
+        toolbar.Add(self.host_background_color, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 4)
+        self.component_status = wx.StaticText(self, label="Components: 0")
+        toolbar.Add(self.component_status, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 6)
+        root.Add(toolbar, 0, wx.EXPAND)
+
+        self.editor = DesignerPanel(self, self._config, on_restart_generated_test=None)
+        self.editor.set_bridge_sync_enabled(False)
+        self.editor.use_document(self._get_shared_document(), select_id=None)
+        root.Add(self.editor, 1, wx.ALL | wx.EXPAND, 4)
+
+        self.SetSizer(root)
+
+        self.refresh_button.Bind(wx.EVT_BUTTON, lambda _evt: self.refresh())
+        self.component_choice.Bind(wx.EVT_CHOICE, self._on_component_selected)
+        self.host_width.Bind(wx.EVT_SPINCTRL, self._on_host_size_changed)
+        self.host_width.Bind(wx.EVT_TEXT, self._on_host_size_changed)
+        self.host_height.Bind(wx.EVT_SPINCTRL, self._on_host_size_changed)
+        self.host_height.Bind(wx.EVT_TEXT, self._on_host_size_changed)
+        self.host_background_mode.Bind(wx.EVT_CHOICE, self._on_host_background_mode_changed)
+        self.host_background_color.Bind(wx.EVT_COLOURPICKER_CHANGED, self._on_host_size_changed)
+
+        self._poll_timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, self._on_poll_timer, self._poll_timer)
+        self._poll_timer.Start(180)
+
+    def refresh(self) -> None:
+        # Reload selector entries and keep editor focused on selected component root.
+
+        current_id: Optional[str] = None
+        current_index = self.component_choice.GetSelection()
+        if 0 <= current_index < len(self._choices):
+            current_id = self._choices[current_index][0]
+
+        self._choices = self._get_components()
+        self.component_choice.Clear()
+        for _component_id, component_name in self._choices:
+            self.component_choice.Append(component_name)
+
+        self.component_status.SetLabel(f"Components: {len(self._choices)}")
+        if not self._choices:
+            self._active_component_id = None
+            self._last_preview_signature = ""
+            self.editor.set_scope(None, hide_window_nodes=False)
+            return
+
+        restore_index = 0
+        if current_id is not None:
+            for index, (component_id, _component_name) in enumerate(self._choices):
+                if component_id == current_id:
+                    restore_index = index
+                    break
+
+        self.component_choice.SetSelection(restore_index)
+        self._focus_selected_component()
+
+    def set_active(self, active: bool) -> None:
+        # Gate background preview sync to this tab's visibility so main editor state is not overridden.
+
+        self._is_active = active
+        if active:
+            self.refresh()
+            self._sync_active_component_preview()
+
+    def _on_component_selected(self, _event: wx.CommandEvent) -> None:
+        # Focus embedded editor to selected component instance root.
+
+        self._focus_selected_component()
+
+    def _focus_selected_component(self) -> None:
+        # Select first instance root for chosen component in embedded full editor.
+
+        index = self.component_choice.GetSelection()
+        if index == wx.NOT_FOUND or index < 0 or index >= len(self._choices):
+            return
+
+        component_id, component_name = self._choices[index]
+        if not self.editor.focus_component_for_edit(component_id):
+            wx.MessageBox(f"No instance found for component: {component_name}", "UI Maker", wx.OK | wx.ICON_WARNING)
+            self._active_component_id = None
+            self._last_preview_signature = ""
+            return
+
+        roots = self.editor.get_document().get_component_instance_roots(component_id)
+        if roots:
+            self.editor.set_scope([roots[0]], hide_window_nodes=True)
+        self._active_component_id = component_id
+        self._last_preview_signature = ""
+
+    def _on_host_size_changed(self, _event: wx.CommandEvent) -> None:
+        # Force preview refresh when component editor host dimensions change.
+
+        self._last_preview_signature = ""
+
+    def _on_host_background_mode_changed(self, _event: wx.CommandEvent) -> None:
+        # Toggle host background color control and force preview refresh.
+
+        self.host_background_color.Enable(self.host_background_mode.GetStringSelection() == "Solid")
+        self._last_preview_signature = ""
+
+    @staticmethod
+    def _hex_from_colour(colour: wx.Colour) -> str:
+        # Convert wx color to #RRGGBB token for preview payload.
+
+        return f"#{colour.Red():02x}{colour.Green():02x}{colour.Blue():02x}"
+
+    @staticmethod
+    def _resolve_host_axis(raw_value: int, root_mode: str, root_size: int, fallback: int, minimum: int) -> int:
+        # Resolve host axis size where 0 means auto-from-component-root when root axis is manual.
+
+        if raw_value > 0:
+            return max(minimum, raw_value)
+        if root_mode != "Auto":
+            return max(minimum, root_size)
+        return max(minimum, fallback)
+
+    @staticmethod
+    def _safe_int(value: object, fallback: int) -> int:
+        # Parse integer-like values for preview sizing without raising.
+
+        try:
+            if isinstance(value, bool):
+                return fallback
+            if isinstance(value, int):
+                return value
+            if isinstance(value, float):
+                return int(round(value))
+            if isinstance(value, str):
+                return int(value.strip())
+        except Exception:
+            return fallback
+        return fallback
+
+    def _build_component_preview_payload(self, template: dict) -> dict:
+        # Wrap active component in a preview-only host container for accurate auto-size behavior.
+
+        root_width = self._safe_int(template.get("width", 220), 220)
+        root_height = self._safe_int(template.get("height", 70), 70)
+        root_width_mode = str(template.get("width_mode", "Manual"))
+        root_height_mode = str(template.get("height_mode", "Manual"))
+
+        host_width = self._resolve_host_axis(int(self.host_width.GetValue()), root_width_mode, root_width, fallback=1200, minimum=200)
+        host_height = self._resolve_host_axis(int(self.host_height.GetValue()), root_height_mode, root_height, fallback=800, minimum=120)
+        wrapped_template = json.loads(json.dumps(template))
+
+        background_mode = self.host_background_mode.GetStringSelection()
+        background_solid = background_mode == "Solid"
+        background_color = self._hex_from_colour(self.host_background_color.GetColour()) if background_solid else "#00000000"
+
+        return {
+            "id": "component_preview_host",
+            "type": "Container",
+            "name": "ComponentPreviewHost",
+            "x": 0,
+            "y": 0,
+            "width": host_width,
+            "height": host_height,
+            "text": "",
+            "text_alignment": "Left",
+            "text_color_override": False,
+            "text_color": "#ffffff",
+            "background_color_override": background_solid,
+            "background_color": background_color,
+            "multiline": False,
+            "border_color": "",
+            "layout": "Vertical",
+            "child_alignment": "UpperLeft",
+            "spacing": 12,
+            "padding": 12,
+            "padding_left": 12,
+            "padding_right": 12,
+            "padding_top": 12,
+            "padding_bottom": 12,
+            "width_mode": "Manual",
+            "height_mode": "Manual",
+            "scroll_vertical": False,
+            "scroll_horizontal": False,
+            "props": {},
+            "children": [wrapped_template],
+        }
+
+    def _sync_active_component_preview(self) -> None:
+        # Re-push preview when component template or host size changes.
+
+        if self._active_component_id is None:
+            return
+
+        template = self._get_component_template(self._active_component_id)
+        if template is None:
+            return
+
+        payload = self._build_component_preview_payload(template)
+        signature = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        if signature == self._last_preview_signature:
+            return
+
+        if self._preview_component_in_game(payload):
+            self._last_preview_signature = signature
+
+    def _on_poll_timer(self, _event: wx.TimerEvent) -> None:
+        # Mirror latest in-game preview frame/layout into the scoped component editor canvas.
+
+        if not self._is_active:
+            return
+
+        self._sync_active_component_preview()
+
+        bitmap, layout_payload = self._get_latest_bridge_preview_data()
+        if bitmap is not None:
+            self.editor.canvas.set_preview_bitmap(bitmap)
+        if layout_payload is not None:
+            self.editor.canvas.set_authoritative_layout(layout_payload)
+
+
 class MainFrame(wx.Frame):
     # Combine orchestration and creator workflows in one responsive desktop shell.
 
@@ -1847,6 +2392,7 @@ class MainFrame(wx.Frame):
         self._designer_panel: Optional[DesignerPanel] = None
         self._orchestrator_panel: Optional[OrchestratorPanel] = None
         self._export_panel: Optional[ExportPanel] = None
+        self._components_panel: Optional[ComponentsPanel] = None
         self._generated_restart_in_progress = False
         self._build_ui(config)
         self.Bind(wx.EVT_CLOSE, self._on_close)
@@ -1885,6 +2431,16 @@ class MainFrame(wx.Frame):
         if self._orchestrator_panel is not None:
             self._orchestrator_panel.update_status(message)
 
+    def _show_creator_tab(self) -> None:
+        # Switch notebook to Creator tab when another panel requests focused editing.
+
+        if self._notebook is None or self._designer_panel is None:
+            return
+
+        index = self._notebook.FindPage(self._designer_panel)
+        if index != wx.NOT_FOUND:
+            self._notebook.SetSelection(index)
+
     def _build_ui(self, config: AppConfig) -> None:
         # Build tabbed shell with dedicated operations and design workspaces.
 
@@ -1901,9 +2457,19 @@ class MainFrame(wx.Frame):
             on_connect_bridge=self._designer_panel.connect_bridge_for_export,
             get_bridge_state=self._designer_panel.get_bridge_state_text,
         )
+        self._components_panel = ComponentsPanel(
+            self._notebook,
+            config=config,
+            get_components=self._designer_panel.list_component_choices,
+            get_shared_document=self._designer_panel.get_document,
+            get_component_template=self._designer_panel.get_component_template,
+            preview_component_in_game=self._designer_panel.preview_component_in_game,
+            get_latest_bridge_preview_data=self._designer_panel.get_latest_bridge_preview_data,
+        )
         self._notebook.AddPage(self._orchestrator_panel, "Build & Run")
         self._notebook.AddPage(self._designer_panel, "Creator & Visualizer")
         self._notebook.AddPage(self._export_panel, "Export")
+        self._notebook.AddPage(self._components_panel, "Components")
         self._notebook.Bind(wx.EVT_NOTEBOOK_PAGE_CHANGED, self._on_tab_changed)
 
         root = wx.BoxSizer(wx.VERTICAL)
@@ -1916,6 +2482,11 @@ class MainFrame(wx.Frame):
         if self._notebook is not None and self._designer_panel is not None and self._export_panel is not None:
             selected_page = self._notebook.GetPage(event.GetSelection())
             self._designer_panel.set_export_tab_active(selected_page is self._export_panel)
+            if self._components_panel is not None:
+                components_active = selected_page is self._components_panel
+                self._components_panel.set_active(components_active)
+                if not components_active:
+                    self._designer_panel.force_snapshot_sync()
 
         event.Skip()
 

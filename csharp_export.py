@@ -4,6 +4,9 @@ import json
 from pathlib import Path
 from typing import Any, Optional
 
+TEMPLATES_DIR = Path(__file__).resolve().parent / "templates" / "csharp"
+UI_NODE_RUNTIME_TEMPLATE = TEMPLATES_DIR / "ui_node_runtime.cs.tpl"
+
 CONTAINER_TYPES = {"Window", "ClosableWindow", "Container", "Box"}
 KNOWN_NODE_ORDER = [
     "id",
@@ -40,6 +43,32 @@ KNOWN_NODE_ORDER = [
 SIZE_MODE_MANUAL = "Manual"
 SIZE_MODE_AUTO = "Auto"
 
+TEXT_ANCHOR_TOKEN_BY_NAME = {
+    "Left": "TextAnchor.MiddleLeft",
+    "Center": "TextAnchor.MiddleCenter",
+    "Right": "TextAnchor.MiddleRight",
+    "TopLeft": "TextAnchor.UpperLeft",
+    "Top": "TextAnchor.UpperCenter",
+    "TopRight": "TextAnchor.UpperRight",
+    "BottomLeft": "TextAnchor.LowerLeft",
+    "Bottom": "TextAnchor.LowerCenter",
+    "BottomRight": "TextAnchor.LowerRight",
+    "UpperLeft": "TextAnchor.UpperLeft",
+    "UpperCenter": "TextAnchor.UpperCenter",
+    "UpperRight": "TextAnchor.UpperRight",
+    "MiddleLeft": "TextAnchor.MiddleLeft",
+    "MiddleCenter": "TextAnchor.MiddleCenter",
+    "MiddleRight": "TextAnchor.MiddleRight",
+    "LowerLeft": "TextAnchor.LowerLeft",
+    "LowerCenter": "TextAnchor.LowerCenter",
+    "LowerRight": "TextAnchor.LowerRight",
+}
+
+LAYOUT_TOKEN_BY_NAME = {
+    "Vertical": "SFS.UI.ModGUI.Type.Vertical",
+    "Horizontal": "SFS.UI.ModGUI.Type.Horizontal",
+}
+
 
 def generate_csharp_export(snapshot: dict, source_file: Optional[Path]) -> str:
     # Generate compact, executable C# that directly builds ModGUI/UITools elements.
@@ -47,6 +76,9 @@ def generate_csharp_export(snapshot: dict, source_file: Optional[Path]) -> str:
     _ = source_file
     normalized_snapshot = _normalize_snapshot(snapshot)
     node_count = _count_nodes(normalized_snapshot.get("roots", []))
+
+    component_definitions = _normalize_component_definitions(snapshot.get("components"))
+    component_instance_by_root_id = _extract_component_instances(snapshot.get("component_instances"), component_definitions)
 
     ordered_nodes = _collect_nodes_preorder(normalized_snapshot["roots"])
     export_id_map = _build_export_id_map(ordered_nodes)
@@ -76,11 +108,26 @@ def generate_csharp_export(snapshot: dict, source_file: Optional[Path]) -> str:
     lines.append("            return new List<UiNode>")
     lines.append("            {")
     root_sibling_count = len(normalized_snapshot["roots"])
+    component_method_names = _build_component_method_names(component_definitions)
     for root in normalized_snapshot["roots"]:
-        lines.extend(_build_node_initializer_lines(root, export_id_map, indent=16, trailing_comma=True, sibling_count=root_sibling_count))
+        lines.extend(
+            _build_node_initializer_lines(
+                root,
+                export_id_map,
+                indent=16,
+                trailing_comma=True,
+                sibling_count=root_sibling_count,
+                component_instance_by_root_id=component_instance_by_root_id,
+                component_method_names=component_method_names,
+            )
+        )
     lines.append("            };")
     lines.append("        }")
     lines.append("")
+    component_lines = _emit_component_method_lines(component_definitions, component_method_names)
+    if component_lines:
+        lines.extend(component_lines)
+        lines.append("")
     lines.extend(_emit_ui_node_class_lines())
     lines.append("    }")
     lines.append("}")
@@ -89,641 +136,13 @@ def generate_csharp_export(snapshot: dict, source_file: Optional[Path]) -> str:
 
 
 def _emit_ui_node_class_lines() -> list[str]:
-    # Emit a full UiNode runtime renderer that instantiates ModGUI/UITools elements.
+    # Load the full UiNode runtime renderer from a reusable C# template file.
 
-    lines: list[str] = []
-    lines.append("        private static GameObject? _activeHolder;")
-    lines.append("        private static Window? _activeWindow;")
-    lines.append("        private static RenderOptions? _activeOptions;")
-    lines.append("")
-    lines.append("        public sealed class RenderOptions")
-    lines.append("        {")
-    lines.append("            public Builder.SceneToAttach SceneToAttach { get; set; } = Builder.SceneToAttach.CurrentScene;")
-    lines.append("            public string HolderName { get; set; } = \"GeneratedUIHolder\";")
-    lines.append("            public bool WindowDraggable { get; set; }")
-    lines.append("            public WindowRenderMode WindowMode { get; set; } = WindowRenderMode.AsDefined;")
-    lines.append("            public int? Width { get; set; }")
-    lines.append("            public int? Height { get; set; }")
-    lines.append("            public bool StartHidden { get; set; }")
-    lines.append("            public bool RemoveExistingBeforeRender { get; set; } = true;")
-    lines.append("        }")
-    lines.append("")
-    lines.append("        public enum WindowRenderMode")
-    lines.append("        {")
-    lines.append("            AsDefined,")
-    lines.append("            ForceNormal,")
-    lines.append("            ForceClosable,")
-    lines.append("        }")
-    lines.append("")
-    lines.append("        public enum UiNodeType")
-    lines.append("        {")
-    lines.append("            Window,")
-    lines.append("            ClosableWindow,")
-    lines.append("            Container,")
-    lines.append("            Box,")
-    lines.append("            Label,")
-    lines.append("            Button,")
-    lines.append("            TextInput,")
-    lines.append("            Toggle,")
-    lines.append("            Slider,")
-    lines.append("            Separator,")
-    lines.append("            Space,")
-    lines.append("            NumberInput,")
-    lines.append("        }")
-    lines.append("")
-    lines.append("        public static Window? Render(RenderOptions? options = null)")
-    lines.append("        {")
-    lines.append("            // Render full UI tree into a managed holder.")
-    lines.append("")
-    lines.append("            options ??= new RenderOptions();")
-    lines.append("            if (options.RemoveExistingBeforeRender)")
-    lines.append("                Remove();")
-    lines.append("            _activeOptions = options;")
-    lines.append("")
-    lines.append("            _activeHolder = Builder.CreateHolder(options.SceneToAttach, options.HolderName);")
-    lines.append("            Transform parent = _activeHolder.transform;")
-    lines.append("            _activeWindow = null;")
-    lines.append("")
-    lines.append("            foreach (var node in Define())")
-    lines.append("                node.Build(parent);")
-    lines.append("")
-    lines.append("            if (options.StartHidden && _activeHolder != null)")
-    lines.append("                _activeHolder.SetActive(false);")
-    lines.append("")
-    lines.append("            return _activeWindow;")
-    lines.append("        }")
-    lines.append("")
-    lines.append("        public static void Render(Window window)")
-    lines.append("        {")
-    lines.append("            // Keep compatibility with existing call sites that pass a Window.")
-    lines.append("")
-    lines.append("            _ = window;")
-    lines.append("            Render((RenderOptions?)null);")
-    lines.append("        }")
-    lines.append("")
-    lines.append("        public static void Render(Transform parent)")
-    lines.append("        {")
-    lines.append("            // Render definitions directly under an existing parent transform.")
-    lines.append("")
-    lines.append("            _activeOptions = null;")
-    lines.append("            foreach (var node in Define())")
-    lines.append("                node.Build(parent);")
-    lines.append("        }")
-    lines.append("")
-    lines.append("        public static void Hide()")
-    lines.append("        {")
-    lines.append("            // Hide generated holder without destroying it.")
-    lines.append("")
-    lines.append("            if (_activeHolder != null)")
-    lines.append("                _activeHolder.SetActive(false);")
-    lines.append("        }")
-    lines.append("")
-    lines.append("        public static void Show()")
-    lines.append("        {")
-    lines.append("            // Show generated holder if it exists.")
-    lines.append("")
-    lines.append("            if (_activeHolder != null)")
-    lines.append("                _activeHolder.SetActive(true);")
-    lines.append("        }")
-    lines.append("")
-    lines.append("        public static void Remove()")
-    lines.append("        {")
-    lines.append("            // Destroy generated holder and clear static render state.")
-    lines.append("")
-    lines.append("            if (_activeHolder != null)")
-    lines.append("            {")
-    lines.append("                UnityEngine.Object.Destroy(_activeHolder);")
-    lines.append("                _activeHolder = null;")
-    lines.append("            }")
-    lines.append("            _activeWindow = null;")
-    lines.append("            _activeOptions = null;")
-    lines.append("        }")
-    lines.append("")
-    lines.append("        private static bool ResolveClosableWindowMode(UiNodeType nodeType)")
-    lines.append("        {")
-    lines.append("            // Resolve whether a window node should render as ClosableWindow.")
-    lines.append("")
-    lines.append("            var mode = _activeOptions?.WindowMode ?? WindowRenderMode.AsDefined;")
-    lines.append("            switch (mode)")
-    lines.append("            {")
-    lines.append("                case WindowRenderMode.ForceClosable:")
-    lines.append("                    return nodeType == UiNodeType.Window || nodeType == UiNodeType.ClosableWindow;")
-    lines.append("                case WindowRenderMode.ForceNormal:")
-    lines.append("                    return false;")
-    lines.append("                default:")
-    lines.append("                    return nodeType == UiNodeType.ClosableWindow;")
-    lines.append("            }")
-    lines.append("        }")
-    lines.append("")
-    lines.append("        private static UiNode Node(string id, UiNodeType type, string name, int width, int height)")
-    lines.append("        {")
-    lines.append("            // Create one fluent node with required identity and dimensions.")
-    lines.append("")
-    lines.append("            return new UiNode")
-    lines.append("            {")
-    lines.append("                Id = id,")
-    lines.append("                Type = type,")
-    lines.append("                Name = name,")
-    lines.append("                Width = width,")
-    lines.append("                Height = height,")
-    lines.append("            };")
-    lines.append("        }")
-    lines.append("")
-    lines.append("        public sealed class UiNode")
-    lines.append("        {")
-    lines.append("            public string Id { get; set; } = string.Empty;")
-    lines.append("            public UiNodeType Type { get; set; } = UiNodeType.Container;")
-    lines.append("            public string Name { get; set; } = string.Empty;")
-    lines.append("            public int X { get; set; }")
-    lines.append("            public int Y { get; set; }")
-    lines.append("            public int Width { get; set; }")
-    lines.append("            public int Height { get; set; }")
-    lines.append("            public string Text { get; set; } = string.Empty;")
-    lines.append("            public string TextAlignment { get; set; } = \"Left\";")
-    lines.append("            public bool TextColorOverride { get; set; }")
-    lines.append("            public string TextColor { get; set; } = \"#ffffff\";")
-    lines.append("            public bool BackgroundColorOverride { get; set; }")
-    lines.append("            public string BackgroundColor { get; set; } = string.Empty;")
-    lines.append("            public string BorderColor { get; set; } = string.Empty;")
-    lines.append("            public bool Multiline { get; set; }")
-    lines.append("            public string Layout { get; set; } = \"Vertical\";")
-    lines.append("            public string ChildAlignment { get; set; } = \"UpperLeft\";")
-    lines.append("            public int Spacing { get; set; } = 12;")
-    lines.append("            public int PaddingLeft { get; set; } = 12;")
-    lines.append("            public int PaddingRight { get; set; } = 12;")
-    lines.append("            public int PaddingTop { get; set; } = 12;")
-    lines.append("            public int PaddingBottom { get; set; } = 12;")
-    lines.append("            public string WidthMode { get; set; } = \"Manual\";")
-    lines.append("            public string HeightMode { get; set; } = \"Manual\";")
-    lines.append("            public int SiblingCount { get; set; } = 1;")
-    lines.append("            public bool ScrollVertical { get; set; }")
-    lines.append("            public bool ScrollHorizontal { get; set; }")
-    lines.append("            public string PropsJson { get; set; } = \"{}\";")
-    lines.append("            public List<UiNode> Children { get; set; } = new List<UiNode>();")
-    lines.append("            private int? _allocatedWidth;")
-    lines.append("            private int? _allocatedHeight;")
-    lines.append("")
-    lines.append("            public UiNode At(int x, int y)")
-    lines.append("            {")
-    lines.append("                X = x;")
-    lines.append("                Y = y;")
-    lines.append("                return this;")
-    lines.append("            }")
-    lines.append("")
-    lines.append("            public UiNode WithText(string text)")
-    lines.append("            {")
-    lines.append("                Text = text;")
-    lines.append("                return this;")
-    lines.append("            }")
-    lines.append("")
-    lines.append("            public UiNode Visual(string textAlignment, bool multiline, bool textColorOverride, string textColor, bool backgroundColorOverride, string backgroundColor, string borderColor)")
-    lines.append("            {")
-    lines.append("                TextAlignment = textAlignment;")
-    lines.append("                Multiline = multiline;")
-    lines.append("                TextColorOverride = textColorOverride;")
-    lines.append("                TextColor = textColor;")
-    lines.append("                BackgroundColorOverride = backgroundColorOverride;")
-    lines.append("                BackgroundColor = backgroundColor;")
-    lines.append("                BorderColor = borderColor;")
-    lines.append("                return this;")
-    lines.append("            }")
-    lines.append("")
-    lines.append("            public UiNode LayoutConfig(string layout, string childAlignment, int spacing, int paddingLeft, int paddingRight, int paddingTop, int paddingBottom)")
-    lines.append("            {")
-    lines.append("                Layout = layout;")
-    lines.append("                ChildAlignment = childAlignment;")
-    lines.append("                Spacing = spacing;")
-    lines.append("                PaddingLeft = paddingLeft;")
-    lines.append("                PaddingRight = paddingRight;")
-    lines.append("                PaddingTop = paddingTop;")
-    lines.append("                PaddingBottom = paddingBottom;")
-    lines.append("                return this;")
-    lines.append("            }")
-    lines.append("")
-    lines.append("            public UiNode Sizing(string widthMode, string heightMode, int siblingCount)")
-    lines.append("            {")
-    lines.append("                WidthMode = widthMode;")
-    lines.append("                HeightMode = heightMode;")
-    lines.append("                SiblingCount = Math.Max(1, siblingCount);")
-    lines.append("                return this;")
-    lines.append("            }")
-    lines.append("")
-    lines.append("            public UiNode Scroll(bool vertical, bool horizontal)")
-    lines.append("            {")
-    lines.append("                ScrollVertical = vertical;")
-    lines.append("                ScrollHorizontal = horizontal;")
-    lines.append("                return this;")
-    lines.append("            }")
-    lines.append("")
-    lines.append("            public UiNode Props(string propsJson)")
-    lines.append("            {")
-    lines.append("                PropsJson = propsJson;")
-    lines.append("                return this;")
-    lines.append("            }")
-    lines.append("")
-    lines.append("            public UiNode AddChildren(params UiNode[] children)")
-    lines.append("            {")
-    lines.append("                if (children == null || children.Length == 0)")
-    lines.append("                    return this;")
-    lines.append("                Children.AddRange(children);")
-    lines.append("                return this;")
-    lines.append("            }")
-    lines.append("")
-    lines.append("            public Transform Build(Transform parent)")
-    lines.append("            {")
-    lines.append("                var resolvedWidth = ResolveWidth(parent);")
-    lines.append("                var resolvedHeight = ResolveHeight(parent);")
-    lines.append("                var draggable = GeneratedLayout._activeOptions != null && GeneratedLayout._activeOptions.WindowDraggable;")
-    lines.append("                object element;")
-    lines.append("                Transform transform;")
-    lines.append("                Transform childParent;")
-    lines.append("")
-    lines.append("                switch (Type)")
-    lines.append("                {")
-    lines.append("                    case UiNodeType.Window:")
-    lines.append("                    case UiNodeType.ClosableWindow:")
-    lines.append("                    {")
-    lines.append("                        if (GeneratedLayout.ResolveClosableWindowMode(Type))")
-    lines.append("                        {")
-    lines.append("                            var closable = UIToolsBuilder.CreateClosableWindow(parent, DeterministicId(Id), resolvedWidth, resolvedHeight, X, Y, draggable: draggable, savePosition: false, titleText: string.IsNullOrWhiteSpace(Text) ? Name : Text, minimized: false);")
-    lines.append("                            if (closable.rectTransform != null)")
-    lines.append("                                ClampRectTransformToScreen(closable.rectTransform);")
-    lines.append("                            ConfigureLayout(closable);")
-    lines.append("                            if (ScrollVertical)")
-    lines.append("                                closable.EnableScrolling(SFS.UI.ModGUI.Type.Vertical);")
-    lines.append("                            if (ScrollHorizontal)")
-    lines.append("                                closable.EnableScrolling(SFS.UI.ModGUI.Type.Horizontal);")
-    lines.append("                            element = closable;")
-    lines.append("                            transform = closable.gameObject.transform;")
-    lines.append("                            childParent = closable.ChildrenHolder;")
-    lines.append("                        }")
-    lines.append("                        else")
-    lines.append("                        {")
-    lines.append("                            var window = Builder.CreateWindow(parent, DeterministicId(Id), resolvedWidth, resolvedHeight, X, Y, draggable: draggable, savePosition: false, titleText: string.IsNullOrWhiteSpace(Text) ? Name : Text);")
-    lines.append("                            if (window.rectTransform != null)")
-    lines.append("                                ClampRectTransformToScreen(window.rectTransform);")
-    lines.append("                            ConfigureLayout(window);")
-    lines.append("                            if (ScrollVertical)")
-    lines.append("                                window.EnableScrolling(SFS.UI.ModGUI.Type.Vertical);")
-    lines.append("                            if (ScrollHorizontal)")
-    lines.append("                                window.EnableScrolling(SFS.UI.ModGUI.Type.Horizontal);")
-    lines.append("                            element = window;")
-    lines.append("                            transform = window.gameObject.transform;")
-    lines.append("                            childParent = window.ChildrenHolder;")
-    lines.append("                        }")
-    lines.append("                        break;")
-    lines.append("                    }")
-    lines.append("                    case UiNodeType.Container:")
-    lines.append("                    {")
-    lines.append("                        var container = Builder.CreateContainer(parent, X, Y);")
-    lines.append("                        container.Size = new Vector2(resolvedWidth, resolvedHeight);")
-    lines.append("                        ConfigureLayout(container);")
-    lines.append("                        element = container;")
-    lines.append("                        transform = container.gameObject.transform;")
-    lines.append("                        childParent = container.gameObject.transform;")
-    lines.append("                        break;")
-    lines.append("                    }")
-    lines.append("                    case UiNodeType.Box:")
-    lines.append("                    {")
-    lines.append("                        var box = Builder.CreateBox(parent, resolvedWidth, resolvedHeight, X, Y, opacity: 0.35f);")
-    lines.append("                        ConfigureLayout(box);")
-    lines.append("                        element = box;")
-    lines.append("                        transform = box.gameObject.transform;")
-    lines.append("                        childParent = box.gameObject.transform;")
-    lines.append("                        break;")
-    lines.append("                    }")
-    lines.append("                    case UiNodeType.Label:")
-    lines.append("                    {")
-    lines.append("                        var label = Builder.CreateLabel(parent, resolvedWidth, resolvedHeight, X, Y, Text);")
-    lines.append("                        element = label;")
-    lines.append("                        transform = label.gameObject.transform;")
-    lines.append("                        childParent = label.gameObject.transform;")
-    lines.append("                        break;")
-    lines.append("                    }")
-    lines.append("                    case UiNodeType.Button:")
-    lines.append("                    {")
-    lines.append("                        var button = Builder.CreateButton(parent, resolvedWidth, resolvedHeight, X, Y, null, Text);")
-    lines.append("                        element = button;")
-    lines.append("                        transform = button.gameObject.transform;")
-    lines.append("                        childParent = button.gameObject.transform;")
-    lines.append("                        break;")
-    lines.append("                    }")
-    lines.append("                    case UiNodeType.TextInput:")
-    lines.append("                    {")
-    lines.append("                        var input = Builder.CreateTextInput(parent, resolvedWidth, resolvedHeight, X, Y, Text, null);")
-    lines.append("                        element = input;")
-    lines.append("                        transform = input.gameObject.transform;")
-    lines.append("                        childParent = input.gameObject.transform;")
-    lines.append("                        break;")
-    lines.append("                    }")
-    lines.append("                    case UiNodeType.Toggle:")
-    lines.append("                    {")
-    lines.append("                        var state = false;")
-    lines.append("                        var toggle = Builder.CreateToggle(parent, () => state, X, Y, () => state = !state);")
-    lines.append("                        element = toggle;")
-    lines.append("                        transform = toggle.gameObject.transform;")
-    lines.append("                        childParent = toggle.gameObject.transform;")
-    lines.append("                        break;")
-    lines.append("                    }")
-    lines.append("                    case UiNodeType.Slider:")
-    lines.append("                    {")
-    lines.append("                        var slider = Builder.CreateSlider(parent, resolvedWidth, 0f, (0f, 1f), false, null, null);")
-    lines.append("                        element = slider;")
-    lines.append("                        transform = slider.gameObject.transform;")
-    lines.append("                        childParent = slider.gameObject.transform;")
-    lines.append("                        break;")
-    lines.append("                    }")
-    lines.append("                    case UiNodeType.Separator:")
-    lines.append("                    {")
-    lines.append("                        var separator = Builder.CreateSeparator(parent, resolvedWidth, X, Y);")
-    lines.append("                        element = separator;")
-    lines.append("                        transform = separator.gameObject.transform;")
-    lines.append("                        childParent = separator.gameObject.transform;")
-    lines.append("                        break;")
-    lines.append("                    }")
-    lines.append("                    case UiNodeType.Space:")
-    lines.append("                    {")
-    lines.append("                        var space = Builder.CreateSpace(parent, resolvedWidth, resolvedHeight);")
-    lines.append("                        element = space;")
-    lines.append("                        transform = space.gameObject.transform;")
-    lines.append("                        childParent = space.gameObject.transform;")
-    lines.append("                        break;")
-    lines.append("                    }")
-    lines.append("                    case UiNodeType.NumberInput:")
-    lines.append("                    {")
-    lines.append("                        var number = UIToolsBuilder.CreateNumberInput(parent, resolvedWidth, resolvedHeight, 0f, 1f, X, Y);")
-    lines.append("                        element = number;")
-    lines.append("                        transform = number.gameObject.transform;")
-    lines.append("                        childParent = number.gameObject.transform;")
-    lines.append("                        break;")
-    lines.append("                    }")
-    lines.append("                    default:")
-    lines.append("                        throw new InvalidOperationException($\"Unsupported UiNode type: {Type}\");")
-    lines.append("                }")
-    lines.append("")
-    lines.append("                ApplyVisualStyle(element);")
-    lines.append("                ApplyChildAutoSizing(resolvedWidth, resolvedHeight);")
-    lines.append("")
-    lines.append("                foreach (var child in Children)")
-    lines.append("                    child.Build(childParent);")
-    lines.append("")
-    lines.append("                return transform;")
-    lines.append("            }")
-    lines.append("")
-    lines.append("            private int ResolveWidth(Transform parent)")
-    lines.append("            {")
-    lines.append("                if (_allocatedWidth != null)")
-    lines.append("                    return Math.Max(1, _allocatedWidth.Value);")
-    lines.append("                if (Type == UiNodeType.Window || Type == UiNodeType.ClosableWindow)")
-    lines.append("                {")
-    lines.append("                    var options = GeneratedLayout._activeOptions;")
-    lines.append("                    if (options?.Width != null)")
-    lines.append("                        return Math.Max(1, options.Width.Value);")
-    lines.append("                }")
-    lines.append("")
-    lines.append("                return ResolveAxisSize(parent, true, WidthMode, Width);")
-    lines.append("            }")
-    lines.append("")
-    lines.append("            private int ResolveHeight(Transform parent)")
-    lines.append("            {")
-    lines.append("                if (_allocatedHeight != null)")
-    lines.append("                    return Math.Max(1, _allocatedHeight.Value);")
-    lines.append("                if (Type == UiNodeType.Window || Type == UiNodeType.ClosableWindow)")
-    lines.append("                {")
-    lines.append("                    var options = GeneratedLayout._activeOptions;")
-    lines.append("                    if (options?.Height != null)")
-    lines.append("                        return Math.Max(1, options.Height.Value);")
-    lines.append("                }")
-    lines.append("")
-    lines.append("                return ResolveAxisSize(parent, false, HeightMode, Height);")
-    lines.append("            }")
-    lines.append("")
-    lines.append("            private int ResolveAxisSize(Transform parent, bool isWidthAxis, string mode, int manualSize)")
-    lines.append("            {")
-    lines.append("                var clampedManual = Math.Max(1, manualSize);")
-    lines.append("                if (!string.Equals(mode, \"Auto\", StringComparison.Ordinal))")
-    lines.append("                    return clampedManual;")
-    lines.append("")
-    lines.append("                var parentRect = parent as RectTransform;")
-    lines.append("                if (parentRect == null)")
-    lines.append("                    return clampedManual;")
-    lines.append("")
-    lines.append("                var available = isWidthAxis ? parentRect.rect.width : parentRect.rect.height;")
-    lines.append("                var layoutGroup = parent.GetComponent<HorizontalOrVerticalLayoutGroup>();")
-    lines.append("                if (layoutGroup != null)")
-    lines.append("                {")
-    lines.append("                    var axisPadding = isWidthAxis")
-    lines.append("                        ? layoutGroup.padding.left + layoutGroup.padding.right")
-    lines.append("                        : layoutGroup.padding.top + layoutGroup.padding.bottom;")
-    lines.append("                    available = Math.Max(1f, available - axisPadding);")
-    lines.append("")
-    lines.append("                    var siblingCount = Math.Max(1, SiblingCount);")
-    lines.append("                    var totalSpacing = layoutGroup.spacing * Math.Max(0, siblingCount - 1);")
-    lines.append("                    var isPrimaryAxis = (isWidthAxis && layoutGroup is HorizontalLayoutGroup)")
-    lines.append("                        || (!isWidthAxis && layoutGroup is VerticalLayoutGroup);")
-    lines.append("                    if (isPrimaryAxis)")
-    lines.append("                        available = Math.Max(1f, (available - totalSpacing) / siblingCount);")
-    lines.append("                }")
-    lines.append("")
-    lines.append("                return Math.Max(1, (int)Math.Round(available));")
-    lines.append("            }")
-    lines.append("")
-    lines.append("            private void ApplyChildAutoSizing(int parentWidth, int parentHeight)")
-    lines.append("            {")
-    lines.append("                if (Children.Count == 0)")
-    lines.append("                    return;")
-    lines.append("")
-    lines.append("                var innerWidth = Math.Max(1, parentWidth - PaddingLeft - PaddingRight);")
-    lines.append("                var innerHeight = Math.Max(1, parentHeight - PaddingTop - PaddingBottom);")
-    lines.append("                var horizontal = string.Equals(Layout, \"Horizontal\", StringComparison.OrdinalIgnoreCase);")
-    lines.append("                var spacingTotal = Math.Max(0, Children.Count - 1) * Math.Max(0, Spacing);")
-    lines.append("")
-    lines.append("                if (horizontal)")
-    lines.append("                {")
-    lines.append("                    var primaryAvailable = Math.Max(1, innerWidth - spacingTotal);")
-    lines.append("                    var manualTotal = 0;")
-    lines.append("                    var autoCount = 0;")
-    lines.append("                    for (var i = 0; i < Children.Count; i++)")
-    lines.append("                    {")
-    lines.append("                        var child = Children[i];")
-    lines.append("                        if (string.Equals(child.WidthMode, \"Auto\", StringComparison.Ordinal))")
-    lines.append("                            autoCount += 1;")
-    lines.append("                        else")
-    lines.append("                            manualTotal += Math.Max(1, child.Width);")
-    lines.append("                    }")
-    lines.append("")
-    lines.append("                    var remaining = Math.Max(1, primaryAvailable - manualTotal);")
-    lines.append("                    var autoPrimary = autoCount > 0 ? Math.Max(1, remaining / autoCount) : 0;")
-    lines.append("                    for (var i = 0; i < Children.Count; i++)")
-    lines.append("                    {")
-    lines.append("                        var child = Children[i];")
-    lines.append("                        child._allocatedWidth = string.Equals(child.WidthMode, \"Auto\", StringComparison.Ordinal) ? autoPrimary : null;")
-    lines.append("                        child._allocatedHeight = string.Equals(child.HeightMode, \"Auto\", StringComparison.Ordinal) ? innerHeight : null;")
-    lines.append("                    }")
-    lines.append("                    return;")
-    lines.append("                }")
-    lines.append("")
-    lines.append("                var primaryHeightAvailable = Math.Max(1, innerHeight - spacingTotal);")
-    lines.append("                var manualHeightTotal = 0;")
-    lines.append("                var autoHeightCount = 0;")
-    lines.append("                for (var i = 0; i < Children.Count; i++)")
-    lines.append("                {")
-    lines.append("                    var child = Children[i];")
-    lines.append("                    if (string.Equals(child.HeightMode, \"Auto\", StringComparison.Ordinal))")
-    lines.append("                        autoHeightCount += 1;")
-    lines.append("                    else")
-    lines.append("                        manualHeightTotal += Math.Max(1, child.Height);")
-    lines.append("                }")
-    lines.append("")
-    lines.append("                var remainingHeight = Math.Max(1, primaryHeightAvailable - manualHeightTotal);")
-    lines.append("                var autoHeight = autoHeightCount > 0 ? Math.Max(1, remainingHeight / autoHeightCount) : 0;")
-    lines.append("                for (var i = 0; i < Children.Count; i++)")
-    lines.append("                {")
-    lines.append("                    var child = Children[i];")
-    lines.append("                    child._allocatedWidth = string.Equals(child.WidthMode, \"Auto\", StringComparison.Ordinal) ? innerWidth : null;")
-    lines.append("                    child._allocatedHeight = string.Equals(child.HeightMode, \"Auto\", StringComparison.Ordinal) ? autoHeight : null;")
-    lines.append("                }")
-    lines.append("            }")
-    lines.append("")
-    lines.append("            private void ConfigureLayout(Window window)")
-    lines.append("            {")
-    lines.append("                window.CreateLayoutGroup(ParseLayoutType(Layout), ParseTextAnchor(ChildAlignment), Spacing, new RectOffset(PaddingLeft, PaddingRight, PaddingTop, PaddingBottom), true);")
-    lines.append("            }")
-    lines.append("")
-    lines.append("            private void ConfigureLayout(Container container)")
-    lines.append("            {")
-    lines.append("                container.CreateLayoutGroup(ParseLayoutType(Layout), ParseTextAnchor(ChildAlignment), Spacing, new RectOffset(PaddingLeft, PaddingRight, PaddingTop, PaddingBottom), true);")
-    lines.append("            }")
-    lines.append("")
-    lines.append("            private void ConfigureLayout(Box box)")
-    lines.append("            {")
-    lines.append("                box.CreateLayoutGroup(ParseLayoutType(Layout), ParseTextAnchor(ChildAlignment), Spacing, new RectOffset(PaddingLeft, PaddingRight, PaddingTop, PaddingBottom), true);")
-    lines.append("            }")
-    lines.append("")
-    lines.append("")
-    lines.append("            private void ApplyVisualStyle(object element)")
-    lines.append("            {")
-    lines.append("                if (TextColorOverride && TryParseColor(TextColor, out var textColor))")
-    lines.append("                {")
-    lines.append("                    TrySetColorProperty(element, \"TextColor\", textColor);")
-    lines.append("                    TrySetColorProperty(element, \"TitleColor\", textColor);")
-    lines.append("                }")
-    lines.append("")
-    lines.append("                if (BackgroundColorOverride && TryParseColor(BackgroundColor, out var backgroundColor))")
-    lines.append("                {")
-    lines.append("                    TrySetColorProperty(element, \"WindowColor\", backgroundColor);")
-    lines.append("                    TrySetColorProperty(element, \"FieldColor\", backgroundColor);")
-    lines.append("                    TrySetColorProperty(element, \"Color\", backgroundColor);")
-    lines.append("                }")
-    lines.append("")
-    lines.append("                TrySetEnumProperty(element, \"TextAlignment\", TextAlignment);")
-    lines.append("            }")
-    lines.append("")
-    lines.append("            private static bool TryParseColor(string value, out Color color)")
-    lines.append("            {")
-    lines.append("                color = default;")
-    lines.append("                return !string.IsNullOrWhiteSpace(value) && ColorUtility.TryParseHtmlString(value, out color);")
-    lines.append("            }")
-    lines.append("")
-    lines.append("            private static void TrySetColorProperty(object target, string propertyName, Color color)")
-    lines.append("            {")
-    lines.append("                var property = target.GetType().GetProperty(propertyName);")
-    lines.append("                if (property != null && property.CanWrite && property.PropertyType == typeof(Color))")
-    lines.append("                    property.SetValue(target, color, null);")
-    lines.append("            }")
-    lines.append("")
-    lines.append("            private static void TrySetEnumProperty(object target, string propertyName, string value)")
-    lines.append("            {")
-    lines.append("                var property = target.GetType().GetProperty(propertyName);")
-    lines.append("                if (property == null || !property.CanWrite || !property.PropertyType.IsEnum)")
-    lines.append("                    return;")
-    lines.append("                try")
-    lines.append("                {")
-    lines.append("                    var enumValue = Enum.Parse(property.PropertyType, value, true);")
-    lines.append("                    property.SetValue(target, enumValue, null);")
-    lines.append("                }")
-    lines.append("                catch")
-    lines.append("                {")
-    lines.append("                }")
-    lines.append("            }")
-    lines.append("")
-    lines.append("            private static void ClampRectTransformToScreen(RectTransform rectTransform)")
-    lines.append("            {")
-    lines.append("                var corners = new Vector3[4];")
-    lines.append("                rectTransform.GetWorldCorners(corners);")
-    lines.append("")
-    lines.append("                var minX = Mathf.Min(corners[0].x, corners[2].x);")
-    lines.append("                var minY = Mathf.Min(corners[0].y, corners[2].y);")
-    lines.append("                var maxX = Mathf.Max(corners[0].x, corners[2].x);")
-    lines.append("                var maxY = Mathf.Max(corners[0].y, corners[2].y);")
-    lines.append("")
-    lines.append("                var deltaX = 0f;")
-    lines.append("                var deltaY = 0f;")
-    lines.append("                if (minX < 0f)")
-    lines.append("                    deltaX = -minX;")
-    lines.append("                else if (maxX > Screen.width)")
-    lines.append("                    deltaX = Screen.width - maxX;")
-    lines.append("")
-    lines.append("                if (minY < 0f)")
-    lines.append("                    deltaY = -minY;")
-    lines.append("                else if (maxY > Screen.height)")
-    lines.append("                    deltaY = Screen.height - maxY;")
-    lines.append("")
-    lines.append("                if (Mathf.Abs(deltaX) < 0.01f && Mathf.Abs(deltaY) < 0.01f)")
-    lines.append("                    return;")
-    lines.append("")
-    lines.append("                rectTransform.position += new Vector3(deltaX, deltaY, 0f);")
-    lines.append("            }")
-    lines.append("")
-    lines.append("            private static SFS.UI.ModGUI.Type ParseLayoutType(string value)")
-    lines.append("            {")
-    lines.append("                // Parse layout direction with explicit default behavior.")
-    lines.append("")
-    lines.append("                if (string.Equals(value, \"Horizontal\", StringComparison.OrdinalIgnoreCase))")
-    lines.append("                    return SFS.UI.ModGUI.Type.Horizontal;")
-    lines.append("")
-    lines.append("                return SFS.UI.ModGUI.Type.Vertical;")
-    lines.append("            }")
-    lines.append("")
-    lines.append("            private static TextAnchor ParseTextAnchor(string value)")
-    lines.append("            {")
-    lines.append("                // Parse text anchor names into Unity TextAnchor values.")
-    lines.append("")
-    lines.append("                switch (value)")
-    lines.append("                {")
-    lines.append("                    case \"UpperCenter\":")
-    lines.append("                        return TextAnchor.UpperCenter;")
-    lines.append("                    case \"UpperRight\":")
-    lines.append("                        return TextAnchor.UpperRight;")
-    lines.append("                    case \"MiddleLeft\":")
-    lines.append("                        return TextAnchor.MiddleLeft;")
-    lines.append("                    case \"MiddleCenter\":")
-    lines.append("                        return TextAnchor.MiddleCenter;")
-    lines.append("                    case \"MiddleRight\":")
-    lines.append("                        return TextAnchor.MiddleRight;")
-    lines.append("                    case \"LowerLeft\":")
-    lines.append("                        return TextAnchor.LowerLeft;")
-    lines.append("                    case \"LowerCenter\":")
-    lines.append("                        return TextAnchor.LowerCenter;")
-    lines.append("                    case \"LowerRight\":")
-    lines.append("                        return TextAnchor.LowerRight;")
-    lines.append("                    default:")
-    lines.append("                        return TextAnchor.UpperLeft;")
-    lines.append("                }")
-    lines.append("            }")
-    lines.append("")
-    lines.append("            private static int DeterministicId(string id)")
-    lines.append("            {")
-    lines.append("                unchecked")
-    lines.append("                {")
-    lines.append("                    var hash = 23;")
-    lines.append("                    for (var i = 0; i < id.Length; i++)")
-    lines.append("                        hash = hash * 31 + id[i];")
-    lines.append("                    return Math.Abs(hash);")
-    lines.append("                }")
-    lines.append("            }")
-    lines.append("        }")
-    return lines
+    if not UI_NODE_RUNTIME_TEMPLATE.exists():
+        raise FileNotFoundError(f"Missing C# runtime template: {UI_NODE_RUNTIME_TEMPLATE}")
+
+    content = UI_NODE_RUNTIME_TEMPLATE.read_text(encoding="utf-8")
+    return content.splitlines()
 
 
 def _collect_nodes_preorder(roots: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -759,26 +178,41 @@ def _build_node_initializer_lines(
     indent: int,
     trailing_comma: bool,
     sibling_count: int,
+    component_instance_by_root_id: Optional[dict[str, str]] = None,
+    component_method_names: Optional[dict[str, str]] = None,
 ) -> list[str]:
     # Emit one fluent monadic node expression with chainable configuration.
 
     node_id = str(node.get("id", ""))
     export_id = _escape_csharp_string(export_id_map[node_id])
 
+    if component_instance_by_root_id is not None and component_method_names is not None:
+        component_id = component_instance_by_root_id.get(node_id)
+        if component_id is not None:
+            method_name = component_method_names.get(component_id)
+            if method_name is not None:
+                suffix = "," if trailing_comma else ""
+                return [f'{" " * indent}{method_name}("{export_id}"){suffix}']
+
     lines: list[str] = []
     pad = " " * indent
     child_pad = " " * (indent + 4)
 
     node_type_enum = _to_node_type_enum(str(node.get("type", "Container")))
-    name_text = _escape_csharp_string(str(node.get("name", "Node")))
-    text_text = _escape_csharp_string(str(node.get("text", "")))
-    text_alignment = _escape_csharp_string(str(node.get("text_alignment", "Left")))
+    name_text = _escape_csharp_string(_normalize_export_string(str(node.get("name", "Node"))))
+    raw_text = _normalize_export_string(str(node.get("text", "")))
+    text_text = _escape_csharp_string(raw_text)
+    text_alignment = _text_anchor_token(str(node.get("text_alignment", "Left")))
     text_color = _escape_csharp_string(str(node.get("text_color", "#ffffff")))
     background_color = _escape_csharp_string(str(node.get("background_color", "")))
     border_color = _escape_csharp_string(str(node.get("border_color", "")))
-    layout = _escape_csharp_string(str(node.get("layout", "Vertical")))
-    child_alignment = _escape_csharp_string(str(node.get("child_alignment", "UpperLeft")))
-    props_json = _escape_csharp_string(json.dumps(node.get("props", {}), separators=(",", ":"), ensure_ascii=True))
+    layout = _layout_token(str(node.get("layout", "Vertical")))
+    child_alignment = _text_anchor_token(str(node.get("child_alignment", "UpperLeft")))
+    props_value = node.get("props", {}) if isinstance(node.get("props", {}), dict) else {}
+    props_json = _escape_csharp_string(json.dumps(props_value, separators=(",", ":"), ensure_ascii=True))
+    label_direction = str(props_value.get("label_direction", "Top"))
+    label_text_raw = _normalize_export_string(str(props_value.get("label_text", raw_text)))
+    control_text_raw = _normalize_export_string(str(props_value.get("control_text", raw_text)))
 
     x = _as_int(node.get("x", 0), "x")
     y = _as_int(node.get("y", 0), "y")
@@ -793,8 +227,8 @@ def _build_node_initializer_lines(
     text_color_override = _bool_token(_as_bool(node.get("text_color_override", False), "text_color_override"))
     background_color_override = _bool_token(_as_bool(node.get("background_color_override", False), "background_color_override"))
     multiline = _bool_token(_as_bool(node.get("multiline", False), "multiline"))
-    width_mode = _escape_csharp_string(_normalize_size_mode(node.get("width_mode", _legacy_full_flag_to_mode(node.get("full_width", True))), "width_mode"))
-    height_mode = _escape_csharp_string(_normalize_size_mode(node.get("height_mode", _legacy_full_flag_to_mode(node.get("full_height", False))), "height_mode"))
+    width_mode = _size_mode_token(_normalize_size_mode(node.get("width_mode", _legacy_full_flag_to_mode(node.get("full_width", True))), "width_mode"))
+    height_mode = _size_mode_token(_normalize_size_mode(node.get("height_mode", _legacy_full_flag_to_mode(node.get("full_height", False))), "height_mode"))
     scroll_vertical = _bool_token(_as_bool(node.get("scroll_vertical", False), "scroll_vertical"))
     scroll_horizontal = _bool_token(_as_bool(node.get("scroll_horizontal", False), "scroll_horizontal"))
 
@@ -806,7 +240,7 @@ def _build_node_initializer_lines(
         lines.append(f'{child_pad}.WithText("{text_text}")')
 
     has_visual_change = (
-        text_alignment != "Left"
+        text_alignment != "TextAnchor.MiddleLeft"
         or multiline != "false"
         or text_color_override != "false"
         or text_color != "#ffffff"
@@ -816,12 +250,12 @@ def _build_node_initializer_lines(
     )
     if has_visual_change:
         lines.append(
-            f'{child_pad}.Visual("{text_alignment}", {multiline}, {text_color_override}, "{text_color}", {background_color_override}, "{background_color}", "{border_color}")'
+            f'{child_pad}.Visual({text_alignment}, {multiline}, {text_color_override}, "{text_color}", {background_color_override}, "{background_color}", "{border_color}")'
         )
 
     has_layout_change = (
-        layout != "Vertical"
-        or child_alignment != "UpperLeft"
+        layout != "SFS.UI.ModGUI.Type.Vertical"
+        or child_alignment != "TextAnchor.UpperLeft"
         or spacing != 12
         or padding_left != 12
         or padding_right != 12
@@ -830,14 +264,20 @@ def _build_node_initializer_lines(
     )
     if has_layout_change:
         lines.append(
-            f'{child_pad}.LayoutConfig("{layout}", "{child_alignment}", {spacing}, {padding_left}, {padding_right}, {padding_top}, {padding_bottom})'
+            f"{child_pad}.LayoutConfig({layout}, {child_alignment}, {spacing}, {padding_left}, {padding_right}, {padding_top}, {padding_bottom})"
         )
 
-    if width_mode != "Manual" or height_mode != "Manual" or sibling_count > 1:
-        lines.append(f'{child_pad}.Sizing("{width_mode}", "{height_mode}", {sibling_count})')
+    if width_mode != "UiSizeMode.Manual" or height_mode != "UiSizeMode.Manual" or sibling_count > 1:
+        lines.append(f"{child_pad}.Sizing({width_mode}, {height_mode}, {sibling_count})")
 
     if scroll_vertical != "false" or scroll_horizontal != "false":
         lines.append(f"{child_pad}.Scroll({scroll_vertical}, {scroll_horizontal})")
+    if node_type_enum in {"ButtonWithLabel", "InputWithLabel", "ToggleWithLabel"}:
+        direction_literal = _escape_csharp_string(label_direction)
+        lines.append(f'{child_pad}.LabelPlacement("{direction_literal}")')
+        label_literal = _escape_csharp_string(label_text_raw)
+        control_literal = _escape_csharp_string(control_text_raw)
+        lines.append(f'{child_pad}.LabeledTexts("{label_literal}", "{control_literal}")')
     if props_json != "{}":
         lines.append(f'{child_pad}.Props("{props_json}")')
 
@@ -849,7 +289,15 @@ def _build_node_initializer_lines(
             if not isinstance(child, dict):
                 continue
             suffix = "," if index < len(children) - 1 else ""
-            child_lines = _build_node_initializer_lines(child, export_id_map, indent + 8, trailing_comma=False, sibling_count=child_sibling_count)
+            child_lines = _build_node_initializer_lines(
+                child,
+                export_id_map,
+                indent + 8,
+                trailing_comma=False,
+                sibling_count=child_sibling_count,
+                component_instance_by_root_id=component_instance_by_root_id,
+                component_method_names=component_method_names,
+            )
             if suffix and len(child_lines) > 0:
                 child_lines[-1] = child_lines[-1] + suffix
             lines.extend(child_lines)
@@ -1110,8 +558,11 @@ def _to_node_type_enum(value: str) -> str:
         "Box",
         "Label",
         "Button",
+        "ButtonWithLabel",
         "TextInput",
+        "InputWithLabel",
         "Toggle",
+        "ToggleWithLabel",
         "Slider",
         "Separator",
         "Space",
@@ -1180,3 +631,276 @@ def _count_nodes(roots: list[dict[str, Any]]) -> int:
         walk(root)
 
     return total
+
+
+def _text_anchor_token(value: str) -> str:
+    # Map alignment strings to generated TextAnchor enum tokens.
+
+    normalized = value.strip()
+    token = TEXT_ANCHOR_TOKEN_BY_NAME.get(normalized)
+    if token is None:
+        return "TextAnchor.MiddleLeft"
+    return token
+
+
+def _layout_token(value: str) -> str:
+    # Map layout strings to generated layout enum tokens.
+
+    normalized = value.strip()
+    token = LAYOUT_TOKEN_BY_NAME.get(normalized)
+    if token is None:
+        return "SFS.UI.ModGUI.Type.Vertical"
+    return token
+
+
+def _size_mode_token(value: str) -> str:
+    # Convert normalized size mode names into generated UiSizeMode tokens.
+
+    if value == SIZE_MODE_AUTO:
+        return "UiSizeMode.Auto"
+    return "UiSizeMode.Manual"
+
+
+def _normalize_export_string(value: str) -> str:
+    # Unwrap accidental JSON-encoded string literals so export text stays human-readable.
+
+    stripped = value.strip()
+    if len(stripped) >= 2 and stripped[0] == '"' and stripped[-1] == '"':
+        try:
+            parsed = json.loads(stripped)
+            if isinstance(parsed, str):
+                return parsed
+        except json.JSONDecodeError:
+            return value
+    return value
+
+
+def _normalize_component_definitions(value: Any) -> dict[str, dict[str, Any]]:
+    # Normalize component definitions from project payload for export method generation.
+
+    definitions: dict[str, dict[str, Any]] = {}
+    if not isinstance(value, list):
+        return definitions
+
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        component_id = str(item.get("id", "")).strip()
+        component_name = str(item.get("name", "")).strip()
+        template = item.get("template")
+        if component_id == "" or component_name == "" or not isinstance(template, dict):
+            continue
+        prepared_template = _template_with_generated_ids(template, component_id, "0")
+        definitions[component_id] = {
+            "id": component_id,
+            "name": component_name,
+            "template": _normalize_node(prepared_template, depth=0),
+        }
+
+    return definitions
+
+
+def _extract_component_instances(value: Any, definitions: dict[str, dict[str, Any]]) -> dict[str, str]:
+    # Build root-id to component-id lookup for top-level method call emission.
+
+    instances: dict[str, str] = {}
+    if not isinstance(value, list):
+        return instances
+
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        root_id = str(item.get("root_id", "")).strip()
+        component_id = str(item.get("component_id", "")).strip()
+        if root_id == "" or component_id == "" or component_id not in definitions:
+            continue
+        instances[root_id] = component_id
+
+    return instances
+
+
+def _template_with_generated_ids(node: dict[str, Any], component_id: str, path: str) -> dict[str, Any]:
+    # Ensure component template nodes have stable IDs required by snapshot normalization.
+
+    prepared = dict(node)
+    node_id = str(prepared.get("id", "")).strip()
+    if node_id == "":
+        prepared["id"] = f"component_{component_id}_{path}"
+
+    children_value = prepared.get("children", [])
+    children_out: list[dict[str, Any]] = []
+    if isinstance(children_value, list):
+        for index, child in enumerate(children_value):
+            if not isinstance(child, dict):
+                continue
+            child_path = f"{path}_{index}"
+            children_out.append(_template_with_generated_ids(child, component_id, child_path))
+    prepared["children"] = children_out
+    return prepared
+
+
+def _build_component_method_names(definitions: dict[str, dict[str, Any]]) -> dict[str, str]:
+    # Produce deterministic unique C# method names for component functions.
+
+    names: dict[str, str] = {}
+    used: set[str] = set()
+    for component_id in sorted(definitions):
+        item = definitions[component_id]
+        raw_name = _sanitize_csharp_identifier(str(item["name"]))
+        if raw_name == "":
+            raw_name = "Component"
+        method_name = f"Create{raw_name}"
+        suffix = 2
+        while method_name in used:
+            method_name = f"Create{raw_name}{suffix}"
+            suffix += 1
+        used.add(method_name)
+        names[component_id] = method_name
+    return names
+
+
+def _sanitize_csharp_identifier(value: str) -> str:
+    # Keep generated method names valid and stable.
+
+    chars: list[str] = []
+    for ch in value:
+        if ch.isalnum() or ch == "_":
+            chars.append(ch)
+    if not chars:
+        return ""
+    identifier = "".join(chars)
+    if identifier[0].isdigit():
+        return f"Component{identifier}"
+    return identifier
+
+
+def _emit_component_method_lines(definitions: dict[str, dict[str, Any]], method_names: dict[str, str]) -> list[str]:
+    # Emit reusable component builder functions referenced by Define().
+
+    lines: list[str] = []
+    for component_id in sorted(definitions):
+        method_name = method_names.get(component_id)
+        if method_name is None:
+            continue
+
+        root = definitions[component_id]["template"]
+        lines.append(f"        private static UiNode {method_name}(string id)")
+        lines.append("        {")
+        lines.append("            // Build component instance subtree.")
+        component_expression = _build_component_node_initializer_lines(root, indent=12, trailing_comma=False, sibling_count=1, node_path="0")
+        if component_expression:
+            component_expression[0] = component_expression[0].replace("Node(", "return Node(", 1)
+            component_expression[-1] = component_expression[-1] + ";"
+            lines.extend(component_expression)
+        else:
+            lines.append("            throw new InvalidOperationException(\"Component template is empty.\");")
+        lines.append("        }")
+        lines.append("")
+
+    return lines
+
+
+def _build_component_node_initializer_lines(
+    node: dict[str, Any],
+    indent: int,
+    trailing_comma: bool,
+    sibling_count: int,
+    node_path: str,
+) -> list[str]:
+    # Emit node fluent expression for reusable component methods with per-instance deterministic IDs.
+
+    lines: list[str] = []
+    pad = " " * indent
+    child_pad = " " * (indent + 4)
+
+    node_type_enum = _to_node_type_enum(str(node.get("type", "Container")))
+    name_text = _escape_csharp_string(_normalize_export_string(str(node.get("name", "Node"))))
+    text_text = _escape_csharp_string(_normalize_export_string(str(node.get("text", ""))))
+    text_alignment = _text_anchor_token(str(node.get("text_alignment", "Left")))
+    text_color = _escape_csharp_string(str(node.get("text_color", "#ffffff")))
+    background_color = _escape_csharp_string(str(node.get("background_color", "")))
+    border_color = _escape_csharp_string(str(node.get("border_color", "")))
+    layout = _layout_token(str(node.get("layout", "Vertical")))
+    child_alignment = _text_anchor_token(str(node.get("child_alignment", "UpperLeft")))
+    props_json = _escape_csharp_string(json.dumps(node.get("props", {}), separators=(",", ":"), ensure_ascii=True))
+
+    x = _as_int(node.get("x", 0), "x")
+    y = _as_int(node.get("y", 0), "y")
+    width = _as_int(node.get("width", 0), "width")
+    height = _as_int(node.get("height", 0), "height")
+    spacing = _as_int(node.get("spacing", 12), "spacing")
+    padding_left = _as_int(node.get("padding_left", 12), "padding_left")
+    padding_right = _as_int(node.get("padding_right", 12), "padding_right")
+    padding_top = _as_int(node.get("padding_top", 12), "padding_top")
+    padding_bottom = _as_int(node.get("padding_bottom", 12), "padding_bottom")
+    text_color_override = _bool_token(_as_bool(node.get("text_color_override", False), "text_color_override"))
+    background_color_override = _bool_token(_as_bool(node.get("background_color_override", False), "background_color_override"))
+    multiline = _bool_token(_as_bool(node.get("multiline", False), "multiline"))
+    width_mode = _size_mode_token(_normalize_size_mode(node.get("width_mode", _legacy_full_flag_to_mode(node.get("full_width", True))), "width_mode"))
+    height_mode = _size_mode_token(_normalize_size_mode(node.get("height_mode", _legacy_full_flag_to_mode(node.get("full_height", False))), "height_mode"))
+    scroll_vertical = _bool_token(_as_bool(node.get("scroll_vertical", False), "scroll_vertical"))
+    scroll_horizontal = _bool_token(_as_bool(node.get("scroll_horizontal", False), "scroll_horizontal"))
+
+    lines.append(f'{pad}Node($"{{id}}/{node_path}", UiNodeType.{node_type_enum}, "{name_text}", {width}, {height})')
+    if x != 0 or y != 0:
+        lines.append(f"{child_pad}.At({x}, {y})")
+    if text_text != "":
+        lines.append(f'{child_pad}.WithText("{text_text}")')
+
+    has_visual_change = (
+        text_alignment != "TextAnchor.MiddleLeft"
+        or multiline != "false"
+        or text_color_override != "false"
+        or text_color != "#ffffff"
+        or background_color_override != "false"
+        or background_color != ""
+        or border_color != ""
+    )
+    if has_visual_change:
+        lines.append(f'{child_pad}.Visual({text_alignment}, {multiline}, {text_color_override}, "{text_color}", {background_color_override}, "{background_color}", "{border_color}")')
+
+    has_layout_change = (
+        layout != "SFS.UI.ModGUI.Type.Vertical"
+        or child_alignment != "TextAnchor.UpperLeft"
+        or spacing != 12
+        or padding_left != 12
+        or padding_right != 12
+        or padding_top != 12
+        or padding_bottom != 12
+    )
+    if has_layout_change:
+        lines.append(f"{child_pad}.LayoutConfig({layout}, {child_alignment}, {spacing}, {padding_left}, {padding_right}, {padding_top}, {padding_bottom})")
+
+    if width_mode != "UiSizeMode.Manual" or height_mode != "UiSizeMode.Manual" or sibling_count > 1:
+        lines.append(f"{child_pad}.Sizing({width_mode}, {height_mode}, {sibling_count})")
+
+    if scroll_vertical != "false" or scroll_horizontal != "false":
+        lines.append(f"{child_pad}.Scroll({scroll_vertical}, {scroll_horizontal})")
+    if props_json != "{}":
+        lines.append(f'{child_pad}.Props("{props_json}")')
+
+    children = node.get("children", [])
+    if isinstance(children, list) and len(children) > 0:
+        child_sibling_count = len(children)
+        lines.append(f"{child_pad}.AddChildren(")
+        for index, child in enumerate(children):
+            if not isinstance(child, dict):
+                continue
+            child_path = f"{node_path}/{index}"
+            suffix = "," if index < len(children) - 1 else ""
+            child_lines = _build_component_node_initializer_lines(
+                child,
+                indent + 8,
+                trailing_comma=False,
+                sibling_count=child_sibling_count,
+                node_path=child_path,
+            )
+            if suffix and child_lines:
+                child_lines[-1] = child_lines[-1] + suffix
+            lines.extend(child_lines)
+        lines.append(f"{child_pad})")
+
+    if trailing_comma and lines:
+        lines[-1] = lines[-1] + ","
+
+    return lines
