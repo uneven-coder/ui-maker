@@ -22,8 +22,11 @@ I like uis that are layout drived meaning they follow full width/height rules an
 But due to comprimised in the editor to allow for the live preview and c# generation some features that would be expected in a ui editor had to be removed or simplified, such as element-specific default props, and some layout options. But overall the core layout and styling features are still there and the live preview allows for quick iteration to achive the desired results.
 Although the generated code is mostly hardcoded replica but should match the ui but responsiveness and interaction is still expected to be implemented manually.
 
+An example ui i created using the editor:
 <img width="2560" height="1405" alt="image" src="https://github.com/user-attachments/assets/56ec59a0-6fb1-4ff2-9574-9f83c155c29d" />
-
+Respective layout overlay:
+<img width="1683" height="897" alt="image" src="https://github.com/user-attachments/assets/6b71ab8a-703d-469a-9b39-d455a08b814c" />
+The layout overlay is great for visualising the true size and position of elements to identify responsive issues.
 
 ## Core Features
 
