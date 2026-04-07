@@ -249,7 +249,7 @@ The generated c# code will include all the helper functions it needs like Types 
 - I have designed it to be responsive but ive had to comprimise some features to achive preview and c# generation so responsiveness is only expected during ui design not in export.
 
 Issues:
-- Scrolling dosent work, or atleast in the normal window
+- ~~Scrolling dosent work, or atleast in the normal window~~
 - Im working on a 2k monitor, meaning the ui may not support your screen size
 - other windows like a collapsable window dont work
 - any features i havent directly used yet arnt garanteed to work, ive tested everything lightly, but this mod was made becuse i was bored and got fustrated making a ui and so features are basic.

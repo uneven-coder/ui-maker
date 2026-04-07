@@ -633,9 +633,19 @@ namespace cdnui
                     var container = Builder.CreateContainer(parent, x, y);
                     container.Size = new Vector2(resolvedWidth, resolvedHeight);
                     DisableContentSizeFitter(container.gameObject.transform);
-                    container.CreateLayoutGroup(ParseLayoutDirection(layoutDirection), ParseTextAnchor(childAlignment), spacing, new RectOffset(paddingLeft, paddingRight, paddingTop, paddingBottom), true);
+                    var contentParent = container.gameObject.transform;
+                    if (scrollVertical || scrollHorizontal)
+                        contentParent = EnsureScrollableContentHost(container.gameObject.transform, scrollVertical, scrollHorizontal);
+
+                    ConfigureLayoutGroup(
+                        contentParent,
+                        ParseLayoutDirection(layoutDirection),
+                        ParseTextAnchor(childAlignment),
+                        spacing,
+                        new RectOffset(paddingLeft, paddingRight, paddingTop, paddingBottom),
+                        disableChildSizeControl: true);
                     ApplyScrolling(container, container.gameObject.transform, scrollVertical, scrollHorizontal);
-                    childParent = container.gameObject.transform;
+                    childParent = contentParent;
                     renderedElement = container.gameObject.transform;
                     renderedInstance = container;
                     break;
@@ -644,9 +654,19 @@ namespace cdnui
                 {
                     var box = Builder.CreateBox(parent, resolvedWidth, resolvedHeight, x, y, opacity: 0.35f);
                     DisableContentSizeFitter(box.gameObject.transform);
-                    box.CreateLayoutGroup(ParseLayoutDirection(layoutDirection), ParseTextAnchor(childAlignment), spacing, new RectOffset(paddingLeft, paddingRight, paddingTop, paddingBottom), true);
+                    var contentParent = box.gameObject.transform;
+                    if (scrollVertical || scrollHorizontal)
+                        contentParent = EnsureScrollableContentHost(box.gameObject.transform, scrollVertical, scrollHorizontal);
+
+                    ConfigureLayoutGroup(
+                        contentParent,
+                        ParseLayoutDirection(layoutDirection),
+                        ParseTextAnchor(childAlignment),
+                        spacing,
+                        new RectOffset(paddingLeft, paddingRight, paddingTop, paddingBottom),
+                        disableChildSizeControl: true);
                     ApplyScrolling(box, box.gameObject.transform, scrollVertical, scrollHorizontal);
-                    childParent = box.gameObject.transform;
+                    childParent = contentParent;
                     renderedElement = box.gameObject.transform;
                     renderedInstance = box;
                     break;
@@ -1201,6 +1221,8 @@ namespace cdnui
         {
             // Enable scrolling when the target supports SFS scroll behavior.
 
+            TryInvokeEnableScrolling(element, vertical, horizontal);
+
             if (element != null)
             {
                 TrySetBoolMember(element, "scrollVertical", vertical);
@@ -1253,6 +1275,145 @@ namespace cdnui
                 if (rectMask != null)
                     rectMask.enabled = true;
             }
+        }
+
+        private static Transform EnsureScrollableContentHost(Transform host, bool vertical, bool horizontal)
+        {
+            // Create/refresh a viewport + content hierarchy required by Unity ScrollRect.
+
+            var hostRect = host as RectTransform ?? host.gameObject.GetComponent<RectTransform>();
+            if (hostRect == null)
+                throw new InvalidOperationException("Scrollable host must have a RectTransform.");
+
+            var viewport = host.Find("__ui_maker_viewport") as RectTransform;
+            if (viewport == null)
+            {
+                var viewportObject = new GameObject("__ui_maker_viewport", typeof(RectTransform));
+                viewport = viewportObject.GetComponent<RectTransform>();
+                viewport.SetParent(host, false);
+            }
+
+            viewport.anchorMin = Vector2.zero;
+            viewport.anchorMax = Vector2.one;
+            viewport.pivot = new Vector2(0.5f, 0.5f);
+            viewport.anchoredPosition = Vector2.zero;
+            viewport.offsetMin = Vector2.zero;
+            viewport.offsetMax = Vector2.zero;
+
+            var viewportMask = viewport.GetComponent<RectMask2D>();
+            if (viewportMask == null)
+                viewportMask = viewport.gameObject.AddComponent<RectMask2D>();
+            viewportMask.enabled = vertical || horizontal;
+
+            var viewportImage = viewport.GetComponent<Image>();
+            if (viewportImage == null)
+                viewportImage = viewport.gameObject.AddComponent<Image>();
+            viewportImage.color = new Color(0f, 0f, 0f, 0f);
+            viewportImage.raycastTarget = true;
+
+            var content = viewport.Find("__ui_maker_content") as RectTransform;
+            if (content == null)
+            {
+                var contentObject = new GameObject("__ui_maker_content", typeof(RectTransform));
+                content = contentObject.GetComponent<RectTransform>();
+                content.SetParent(viewport, false);
+            }
+
+            content.localScale = Vector3.one;
+            content.anchoredPosition = Vector2.zero;
+
+            if (vertical && !horizontal)
+            {
+                content.anchorMin = new Vector2(0f, 1f);
+                content.anchorMax = new Vector2(1f, 1f);
+                content.pivot = new Vector2(0.5f, 1f);
+                content.sizeDelta = Vector2.zero;
+            }
+            else if (horizontal && !vertical)
+            {
+                content.anchorMin = new Vector2(0f, 0f);
+                content.anchorMax = new Vector2(0f, 1f);
+                content.pivot = new Vector2(0f, 0.5f);
+                content.sizeDelta = Vector2.zero;
+            }
+            else
+            {
+                content.anchorMin = new Vector2(0f, 1f);
+                content.anchorMax = new Vector2(0f, 1f);
+                content.pivot = new Vector2(0f, 1f);
+                content.sizeDelta = Vector2.zero;
+            }
+
+            var contentFitter = content.GetComponent<ContentSizeFitter>();
+            if (contentFitter == null)
+                contentFitter = content.gameObject.AddComponent<ContentSizeFitter>();
+            contentFitter.horizontalFit = horizontal ? ContentSizeFitter.FitMode.PreferredSize : ContentSizeFitter.FitMode.Unconstrained;
+            contentFitter.verticalFit = vertical ? ContentSizeFitter.FitMode.PreferredSize : ContentSizeFitter.FitMode.Unconstrained;
+
+            var scrollRect = host.gameObject.GetComponent<ScrollRect>();
+            if (scrollRect == null)
+                scrollRect = host.gameObject.AddComponent<ScrollRect>();
+            scrollRect.viewport = viewport;
+            scrollRect.content = content;
+            scrollRect.vertical = vertical;
+            scrollRect.horizontal = horizontal;
+            scrollRect.scrollSensitivity = 25f;
+            scrollRect.movementType = ScrollRect.MovementType.Clamped;
+            scrollRect.inertia = true;
+            scrollRect.enabled = vertical || horizontal;
+            scrollRect.horizontalNormalizedPosition = 0f;
+            scrollRect.verticalNormalizedPosition = 1f;
+
+            return content;
+        }
+
+        private static void ConfigureLayoutGroup(Transform target, SFS.UI.ModGUI.Type layoutType, TextAnchor childAlignment, int spacing, RectOffset padding, bool disableChildSizeControl)
+        {
+            // Apply shared layout-group settings on any target transform.
+
+            HorizontalOrVerticalLayoutGroup layoutGroup;
+            if (layoutType == SFS.UI.ModGUI.Type.Horizontal)
+            {
+                layoutGroup = target.GetComponent<HorizontalLayoutGroup>();
+                if (layoutGroup == null)
+                    layoutGroup = target.gameObject.AddComponent<HorizontalLayoutGroup>();
+            }
+            else
+            {
+                layoutGroup = target.GetComponent<VerticalLayoutGroup>();
+                if (layoutGroup == null)
+                    layoutGroup = target.gameObject.AddComponent<VerticalLayoutGroup>();
+            }
+
+            layoutGroup.childAlignment = childAlignment;
+            layoutGroup.spacing = spacing;
+            if (padding != null)
+                layoutGroup.padding = padding;
+
+            if (disableChildSizeControl)
+            {
+                layoutGroup.childControlWidth = false;
+                layoutGroup.childControlHeight = false;
+                layoutGroup.childForceExpandWidth = false;
+                layoutGroup.childForceExpandHeight = false;
+            }
+        }
+
+        private static void TryInvokeEnableScrolling(object element, bool vertical, bool horizontal)
+        {
+            // Prefer native EnableScrolling(Type) APIs exposed by ModGUI elements.
+
+            if (element == null)
+                return;
+
+            var method = element.GetType().GetMethod("EnableScrolling", new[] { typeof(SFS.UI.ModGUI.Type) });
+            if (method == null)
+                return;
+
+            if (vertical)
+                method.Invoke(element, new object[] { SFS.UI.ModGUI.Type.Vertical });
+            if (horizontal)
+                method.Invoke(element, new object[] { SFS.UI.ModGUI.Type.Horizontal });
         }
 
         private static void TrySetBoolMember(object target, string memberName, bool value)

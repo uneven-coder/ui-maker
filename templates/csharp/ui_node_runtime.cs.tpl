@@ -308,19 +308,29 @@
                     {
                         var container = Builder.CreateContainer(parent, X, Y);
                         container.Size = new Vector2(resolvedWidth, resolvedHeight);
-                        ConfigureLayout(container);
+                        DisableContentSizeFitter(container.gameObject.transform);
+                        Transform contentParent = container.gameObject.transform;
+                        if (ScrollVertical || ScrollHorizontal)
+                            contentParent = EnsureScrollableContentHost(container.gameObject.transform, ScrollVertical, ScrollHorizontal);
+                        ConfigureLayout(contentParent);
+                        ApplyScrolling(container, container.gameObject.transform, ScrollVertical, ScrollHorizontal);
                         element = container;
                         transform = container.gameObject.transform;
-                        childParent = container.gameObject.transform;
+                        childParent = contentParent;
                         break;
                     }
                     case UiNodeType.Box:
                     {
                         var box = Builder.CreateBox(parent, resolvedWidth, resolvedHeight, X, Y, opacity: 0.35f);
-                        ConfigureLayout(box);
+                        DisableContentSizeFitter(box.gameObject.transform);
+                        Transform contentParent = box.gameObject.transform;
+                        if (ScrollVertical || ScrollHorizontal)
+                            contentParent = EnsureScrollableContentHost(box.gameObject.transform, ScrollVertical, ScrollHorizontal);
+                        ConfigureLayout(contentParent);
+                        ApplyScrolling(box, box.gameObject.transform, ScrollVertical, ScrollHorizontal);
                         element = box;
                         transform = box.gameObject.transform;
-                        childParent = box.gameObject.transform;
+                        childParent = contentParent;
                         break;
                     }
                     case UiNodeType.Label:
@@ -652,6 +662,195 @@
             private void ConfigureLayout(Box box)
             {
                 box.CreateLayoutGroup(Layout, ChildAlignment, Spacing, new RectOffset(PaddingLeft, PaddingRight, PaddingTop, PaddingBottom), true);
+            }
+
+            private void ConfigureLayout(Transform target)
+            {
+                HorizontalOrVerticalLayoutGroup layoutGroup;
+                if (Layout == SFS.UI.ModGUI.Type.Horizontal)
+                {
+                    layoutGroup = target.GetComponent<HorizontalLayoutGroup>();
+                    if (layoutGroup == null)
+                        layoutGroup = target.gameObject.AddComponent<HorizontalLayoutGroup>();
+                }
+                else
+                {
+                    layoutGroup = target.GetComponent<VerticalLayoutGroup>();
+                    if (layoutGroup == null)
+                        layoutGroup = target.gameObject.AddComponent<VerticalLayoutGroup>();
+                }
+
+                layoutGroup.childAlignment = ChildAlignment;
+                layoutGroup.spacing = Spacing;
+                layoutGroup.padding = new RectOffset(PaddingLeft, PaddingRight, PaddingTop, PaddingBottom);
+                layoutGroup.childControlWidth = false;
+                layoutGroup.childControlHeight = false;
+                layoutGroup.childForceExpandWidth = false;
+                layoutGroup.childForceExpandHeight = false;
+            }
+
+            private static Transform EnsureScrollableContentHost(Transform host, bool vertical, bool horizontal)
+            {
+                var hostRect = host as RectTransform ?? host.gameObject.GetComponent<RectTransform>();
+                if (hostRect == null)
+                    throw new InvalidOperationException("Scrollable host must have a RectTransform.");
+
+                var viewport = host.Find("__ui_maker_viewport") as RectTransform;
+                if (viewport == null)
+                {
+                    var viewportObject = new GameObject("__ui_maker_viewport", typeof(RectTransform));
+                    viewport = viewportObject.GetComponent<RectTransform>();
+                    viewport.SetParent(host, false);
+                }
+
+                viewport.anchorMin = Vector2.zero;
+                viewport.anchorMax = Vector2.one;
+                viewport.pivot = new Vector2(0.5f, 0.5f);
+                viewport.anchoredPosition = Vector2.zero;
+                viewport.offsetMin = Vector2.zero;
+                viewport.offsetMax = Vector2.zero;
+
+                var viewportMask = viewport.GetComponent<RectMask2D>();
+                if (viewportMask == null)
+                    viewportMask = viewport.gameObject.AddComponent<RectMask2D>();
+                viewportMask.enabled = vertical || horizontal;
+
+                var viewportImage = viewport.GetComponent<Image>();
+                if (viewportImage == null)
+                    viewportImage = viewport.gameObject.AddComponent<Image>();
+                viewportImage.color = new Color(0f, 0f, 0f, 0f);
+                viewportImage.raycastTarget = true;
+
+                var content = viewport.Find("__ui_maker_content") as RectTransform;
+                if (content == null)
+                {
+                    var contentObject = new GameObject("__ui_maker_content", typeof(RectTransform));
+                    content = contentObject.GetComponent<RectTransform>();
+                    content.SetParent(viewport, false);
+                }
+
+                content.localScale = Vector3.one;
+                content.anchoredPosition = Vector2.zero;
+
+                if (vertical && !horizontal)
+                {
+                    content.anchorMin = new Vector2(0f, 1f);
+                    content.anchorMax = new Vector2(1f, 1f);
+                    content.pivot = new Vector2(0.5f, 1f);
+                    content.sizeDelta = Vector2.zero;
+                }
+                else if (horizontal && !vertical)
+                {
+                    content.anchorMin = new Vector2(0f, 0f);
+                    content.anchorMax = new Vector2(0f, 1f);
+                    content.pivot = new Vector2(0f, 0.5f);
+                    content.sizeDelta = Vector2.zero;
+                }
+                else
+                {
+                    content.anchorMin = new Vector2(0f, 1f);
+                    content.anchorMax = new Vector2(0f, 1f);
+                    content.pivot = new Vector2(0f, 1f);
+                    content.sizeDelta = Vector2.zero;
+                }
+
+                var contentFitter = content.GetComponent<ContentSizeFitter>();
+                if (contentFitter == null)
+                    contentFitter = content.gameObject.AddComponent<ContentSizeFitter>();
+                contentFitter.horizontalFit = horizontal ? ContentSizeFitter.FitMode.PreferredSize : ContentSizeFitter.FitMode.Unconstrained;
+                contentFitter.verticalFit = vertical ? ContentSizeFitter.FitMode.PreferredSize : ContentSizeFitter.FitMode.Unconstrained;
+
+                var scrollRect = host.gameObject.GetComponent<ScrollRect>();
+                if (scrollRect == null)
+                    scrollRect = host.gameObject.AddComponent<ScrollRect>();
+                scrollRect.viewport = viewport;
+                scrollRect.content = content;
+                scrollRect.vertical = vertical;
+                scrollRect.horizontal = horizontal;
+                scrollRect.scrollSensitivity = 25f;
+                scrollRect.movementType = ScrollRect.MovementType.Clamped;
+                scrollRect.inertia = true;
+                scrollRect.enabled = vertical || horizontal;
+                scrollRect.horizontalNormalizedPosition = 0f;
+                scrollRect.verticalNormalizedPosition = 1f;
+
+                return content;
+            }
+
+            private static void DisableContentSizeFitter(Transform transform)
+            {
+                var fitter = transform.GetComponent<ContentSizeFitter>();
+                if (fitter == null)
+                    return;
+
+                fitter.horizontalFit = ContentSizeFitter.FitMode.Unconstrained;
+                fitter.verticalFit = ContentSizeFitter.FitMode.Unconstrained;
+                fitter.enabled = false;
+            }
+
+            private static void ApplyScrolling(object element, Transform transform, bool vertical, bool horizontal)
+            {
+                TryInvokeEnableScrolling(element, vertical, horizontal);
+
+                if (element != null)
+                {
+                    TrySetBoolMember(element, "scrollVertical", vertical);
+                    TrySetBoolMember(element, "scrollHorizontal", horizontal);
+                    TrySetBoolMember(element, "ScrollVertical", vertical);
+                    TrySetBoolMember(element, "ScrollHorizontal", horizontal);
+                    TrySetBoolMember(element, "vertical", vertical);
+                    TrySetBoolMember(element, "horizontal", horizontal);
+                    TrySetBoolMember(element, "Vertical", vertical);
+                    TrySetBoolMember(element, "Horizontal", horizontal);
+                }
+
+                if (transform == null)
+                    return;
+
+                var scrollRect = transform.GetComponent<ScrollRect>() ?? transform.GetComponentInChildren<ScrollRect>(true);
+                if (scrollRect != null)
+                {
+                    scrollRect.vertical = vertical;
+                    scrollRect.horizontal = horizontal;
+                    scrollRect.scrollSensitivity = 25f;
+                    scrollRect.inertia = true;
+                    scrollRect.movementType = ScrollRect.MovementType.Clamped;
+                    scrollRect.enabled = vertical || horizontal;
+                }
+
+                var rectMask = transform.GetComponentInChildren<RectMask2D>(true);
+                if (rectMask != null)
+                    rectMask.enabled = vertical || horizontal;
+            }
+
+            private static void TryInvokeEnableScrolling(object element, bool vertical, bool horizontal)
+            {
+                if (element == null)
+                    return;
+
+                var method = element.GetType().GetMethod("EnableScrolling", new[] { typeof(SFS.UI.ModGUI.Type) });
+                if (method == null)
+                    return;
+
+                if (vertical)
+                    method.Invoke(element, new object[] { SFS.UI.ModGUI.Type.Vertical });
+                if (horizontal)
+                    method.Invoke(element, new object[] { SFS.UI.ModGUI.Type.Horizontal });
+            }
+
+            private static void TrySetBoolMember(object target, string memberName, bool value)
+            {
+                var type = target.GetType();
+                var field = type.GetField(memberName, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.IgnoreCase);
+                if (field != null && field.FieldType == typeof(bool))
+                {
+                    field.SetValue(target, value);
+                    return;
+                }
+
+                var property = type.GetProperty(memberName, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.IgnoreCase);
+                if (property != null && property.CanWrite && property.PropertyType == typeof(bool))
+                    property.SetValue(target, value, null);
             }
 
 
