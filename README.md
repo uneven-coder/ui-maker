@@ -22,6 +22,9 @@ I like uis that are layout drived meaning they follow full width/height rules an
 But due to comprimised in the editor to allow for the live preview and c# generation some features that would be expected in a ui editor had to be removed or simplified, such as element-specific default props, and some layout options. But overall the core layout and styling features are still there and the live preview allows for quick iteration to achive the desired results.
 Although the generated code is mostly hardcoded replica but should match the ui but responsiveness and interaction is still expected to be implemented manually.
 
+<img width="2560" height="1405" alt="image" src="https://github.com/user-attachments/assets/56ec59a0-6fb1-4ff2-9574-9f83c155c29d" />
+
+
 ## Core Features
 
 - Visual hierarchy editor
