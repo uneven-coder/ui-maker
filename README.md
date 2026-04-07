@@ -111,6 +111,7 @@ private static UiNode CreateDependancy(string id)
 }
 ```
 
+The generated c# code will include all the helper functions it needs like Types and responsive sizing helpers.
 
 ## What This Tool Does
 
