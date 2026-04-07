@@ -11,6 +11,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using ModLoader;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using SFS.UI.ModGUI;
 using UnityEngine;
@@ -558,7 +559,8 @@ namespace cdnui
             var renderedText = string.IsNullOrWhiteSpace(text) ? nodeName : text;
             var labelText = GetOptionalPropString(node, "label_text", renderedText);
             var controlText = GetOptionalPropString(node, "control_text", renderedText);
-            var labelDirection = GetLabelDirection(node, "Top");
+            var labelDirectionDefault = string.Equals(type, "ToggleWithLabel", StringComparison.OrdinalIgnoreCase) ? "Left" : "Top";
+            var labelDirection = GetLabelDirection(node, labelDirectionDefault);
             var pathSegment = SanitizePathSegment(nodeName);
             var pathKey = string.IsNullOrWhiteSpace(parentPath)
                 ? $"{pathSegment}[{Mathf.Max(0, siblingIndex)}]"
@@ -1148,15 +1150,27 @@ namespace cdnui
             // Read labeled-control direction from props with strict known values.
 
             var props = node["props"] as JObject;
-            var raw = props?["label_direction"]?.ToString() ?? defaultValue;
+            var raw = props?["label_direction"]?.ToString() ?? props?["labelDirection"]?.ToString() ?? defaultValue;
             var normalized = (raw ?? string.Empty).Trim();
-            if (string.Equals(normalized, "Top", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(normalized, "Bottom", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(normalized, "Left", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(normalized, "Right", StringComparison.OrdinalIgnoreCase))
+            if (normalized.Length >= 2 && normalized[0] == '"' && normalized[normalized.Length - 1] == '"')
             {
-                return normalized;
+                try
+                {
+                    normalized = JsonConvert.DeserializeObject<string>(normalized) ?? normalized;
+                }
+                catch
+                {
+                }
             }
+
+            if (string.Equals(normalized, "Top", StringComparison.OrdinalIgnoreCase))
+                return "Top";
+            if (string.Equals(normalized, "Bottom", StringComparison.OrdinalIgnoreCase))
+                return "Bottom";
+            if (string.Equals(normalized, "Left", StringComparison.OrdinalIgnoreCase))
+                return "Left";
+            if (string.Equals(normalized, "Right", StringComparison.OrdinalIgnoreCase))
+                return "Right";
 
             return defaultValue;
         }

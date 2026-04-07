@@ -678,13 +678,14 @@
             private static string NormalizeLabelDirection(string value, string fallback)
             {
                 var normalized = (value ?? string.Empty).Trim();
-                if (string.Equals(normalized, "Top", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(normalized, "Bottom", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(normalized, "Left", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(normalized, "Right", StringComparison.OrdinalIgnoreCase))
-                {
-                    return normalized;
-                }
+                if (string.Equals(normalized, "Top", StringComparison.OrdinalIgnoreCase))
+                    return "Top";
+                if (string.Equals(normalized, "Bottom", StringComparison.OrdinalIgnoreCase))
+                    return "Bottom";
+                if (string.Equals(normalized, "Left", StringComparison.OrdinalIgnoreCase))
+                    return "Left";
+                if (string.Equals(normalized, "Right", StringComparison.OrdinalIgnoreCase))
+                    return "Right";
 
                 return fallback;
             }

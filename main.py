@@ -148,10 +148,12 @@ class DesignerPanel(wx.Panel):
         parent: wx.Window,
         config: AppConfig,
         on_restart_generated_test: Optional[Callable[[str], None]] = None,
+        on_document_mutated: Optional[Callable[[], None]] = None,
     ):
         super().__init__(parent)
         self._config = config
         self._on_restart_generated_test = on_restart_generated_test
+        self._on_document_mutated = on_document_mutated
         self._document = UIDocument()
         self._selection: Optional[str] = None
         self._last_element_type = self.ELEMENT_TYPES[0]
@@ -613,6 +615,11 @@ class DesignerPanel(wx.Panel):
 
         self._sync_snapshot_to_bridge(force=True)
 
+    def refresh_from_document(self) -> None:
+        # Rebuild tree/canvas/inspector from the shared document after external panel edits.
+
+        self._refresh_all(select_id=self._selection, sync_bridge=False)
+
     def _add_element_by_type(self, element_type: str, parent_id: Optional[str]) -> None:
         # Add element directly from toolbar/context actions while preserving last-used type.
 
@@ -623,6 +630,8 @@ class DesignerPanel(wx.Panel):
             self._error(str(ex))
             return
 
+        if parent_id is not None:
+            self._document.sync_component_structure_from_node(parent_id)
         self._refresh_all(select_id=element.id)
 
     def _add_sibling_by_type(self, element_type: str, target_id: str) -> None:
@@ -640,11 +649,19 @@ class DesignerPanel(wx.Panel):
         # Delete specific node ID and clear selection when it is removed.
 
         try:
+            parent_id = self._document.get_parent_id(element_id)
+        except ValueError as ex:
+            self._error(str(ex))
+            return
+
+        try:
             self._document.remove_element(element_id)
         except ValueError as ex:
             self._error(str(ex))
             return
 
+        if parent_id is not None:
+            self._document.sync_component_structure_from_node(parent_id)
         self._refresh_all(select_id=None)
 
     def _on_tree_item_right_click(self, event: wx.TreeEvent) -> None:
@@ -800,6 +817,8 @@ class DesignerPanel(wx.Panel):
 
         try:
             new_id = self._document.paste_subtree_after(target_id, self._copied_subtree_payload)
+            if target_id is not None:
+                self._document.sync_component_structure_from_node(target_id)
             self._refresh_all(select_id=new_id)
         except Exception as ex:
             self._error(f"Paste failed: {ex}")
@@ -1144,6 +1163,8 @@ class DesignerPanel(wx.Panel):
             self._pending_sync.Stop()
 
         self._pending_sync = wx.CallLater(self._snapshot_sync_delay_ms, self._flush_snapshot_sync)
+        if self._on_document_mutated is not None:
+            self._on_document_mutated()
 
     def _flush_snapshot_sync(self) -> None:
         # Flush one pending sync request after debounce delay.
@@ -1183,6 +1204,11 @@ class DesignerPanel(wx.Panel):
         if dragging_id is None:
             return
 
+        try:
+            source_parent_id = self._document.get_parent_id(dragging_id)
+        except ValueError:
+            source_parent_id = None
+
         target_item = event.GetItem()
         drop_point = event.GetPoint()
 
@@ -1192,6 +1218,8 @@ class DesignerPanel(wx.Panel):
         if not target_item.IsOk():
             moved = self._document.move_element(dragging_id, None)
             if moved:
+                if source_parent_id is not None:
+                    self._document.sync_component_structure_from_node(source_parent_id)
                 self._refresh_all(select_id=dragging_id)
             return
 
@@ -1199,6 +1227,8 @@ class DesignerPanel(wx.Panel):
         if target_id is None:
             moved = self._document.move_element(dragging_id, None)
             if moved:
+                if source_parent_id is not None:
+                    self._document.sync_component_structure_from_node(source_parent_id)
                 self._refresh_all(select_id=dragging_id)
             return
 
@@ -1230,6 +1260,9 @@ class DesignerPanel(wx.Panel):
         if drop_mode == "inside" and self._document.elements[target_id].element_type in self.CONTAINER_TYPES:
             moved = self._document.move_element(dragging_id, target_id)
             if moved:
+                if source_parent_id is not None:
+                    self._document.sync_component_structure_from_node(source_parent_id)
+                self._document.sync_component_structure_from_node(target_id)
                 self._refresh_all(select_id=dragging_id)
             return
 
@@ -1244,6 +1277,9 @@ class DesignerPanel(wx.Panel):
 
         moved = self._document.move_element(dragging_id, parent_id, insert_index)
         if moved:
+            if source_parent_id is not None:
+                self._document.sync_component_structure_from_node(source_parent_id)
+            self._document.sync_component_structure_from_node(target_id)
             self._refresh_all(select_id=dragging_id)
 
     def _on_canvas_select(self, element_id: Optional[str]) -> None:
@@ -2132,6 +2168,7 @@ class ComponentsPanel(wx.Panel):
         get_component_template: Callable[[str], Optional[dict]],
         preview_component_in_game: Callable[[dict], bool],
         get_latest_bridge_preview_data: Callable[[], tuple[Optional[wx.Bitmap], Optional[dict]]],
+        on_shared_document_mutated: Optional[Callable[[], None]] = None,
     ):
         super().__init__(parent)
         self._config = config
@@ -2140,6 +2177,7 @@ class ComponentsPanel(wx.Panel):
         self._get_component_template = get_component_template
         self._preview_component_in_game = preview_component_in_game
         self._get_latest_bridge_preview_data = get_latest_bridge_preview_data
+        self._on_shared_document_mutated = on_shared_document_mutated
         self._choices: list[tuple[str, str]] = []
         self._active_component_id: Optional[str] = None
         self._is_active = False
@@ -2174,7 +2212,7 @@ class ComponentsPanel(wx.Panel):
         toolbar.Add(self.component_status, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 6)
         root.Add(toolbar, 0, wx.EXPAND)
 
-        self.editor = DesignerPanel(self, self._config, on_restart_generated_test=None)
+        self.editor = DesignerPanel(self, self._config, on_restart_generated_test=None, on_document_mutated=self._on_editor_document_mutated)
         self.editor.set_bridge_sync_enabled(False)
         self.editor.use_document(self._get_shared_document(), select_id=None)
         root.Add(self.editor, 1, wx.ALL | wx.EXPAND, 4)
@@ -2261,12 +2299,26 @@ class ComponentsPanel(wx.Panel):
         # Force preview refresh when component editor host dimensions change.
 
         self._last_preview_signature = ""
+        self._sync_active_component_preview()
 
     def _on_host_background_mode_changed(self, _event: wx.CommandEvent) -> None:
         # Toggle host background color control and force preview refresh.
 
         self.host_background_color.Enable(self.host_background_mode.GetStringSelection() == "Solid")
         self._last_preview_signature = ""
+        self._sync_active_component_preview()
+
+    def _on_editor_document_mutated(self) -> None:
+        # Push updated component snapshot immediately when embedded editor mutates shared document.
+
+        if self._on_shared_document_mutated is not None:
+            self._on_shared_document_mutated()
+
+        if not self._is_active:
+            return
+
+        self._last_preview_signature = ""
+        self._sync_active_component_preview()
 
     @staticmethod
     def _hex_from_colour(colour: wx.Colour) -> str:
@@ -2465,6 +2517,7 @@ class MainFrame(wx.Frame):
             get_component_template=self._designer_panel.get_component_template,
             preview_component_in_game=self._designer_panel.preview_component_in_game,
             get_latest_bridge_preview_data=self._designer_panel.get_latest_bridge_preview_data,
+            on_shared_document_mutated=self._designer_panel.refresh_from_document,
         )
         self._notebook.AddPage(self._orchestrator_panel, "Build & Run")
         self._notebook.AddPage(self._designer_panel, "Creator & Visualizer")
@@ -2486,6 +2539,7 @@ class MainFrame(wx.Frame):
                 components_active = selected_page is self._components_panel
                 self._components_panel.set_active(components_active)
                 if not components_active:
+                    self._designer_panel.refresh_from_document()
                     self._designer_panel.force_snapshot_sync()
 
         event.Skip()

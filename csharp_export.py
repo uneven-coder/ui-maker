@@ -210,7 +210,9 @@ def _build_node_initializer_lines(
     child_alignment = _text_anchor_token(str(node.get("child_alignment", "UpperLeft")))
     props_value = node.get("props", {}) if isinstance(node.get("props", {}), dict) else {}
     props_json = _escape_csharp_string(json.dumps(props_value, separators=(",", ":"), ensure_ascii=True))
-    label_direction = str(props_value.get("label_direction", "Top"))
+    label_direction_raw = props_value.get("label_direction", props_value.get("labelDirection", "Top"))
+    toggle_default_direction = "Left" if node_type_enum == "ToggleWithLabel" else "Top"
+    label_direction = _normalize_label_direction(label_direction_raw, toggle_default_direction)
     label_text_raw = _normalize_export_string(str(props_value.get("label_text", raw_text)))
     control_text_raw = _normalize_export_string(str(props_value.get("control_text", raw_text)))
 
@@ -675,6 +677,15 @@ def _normalize_export_string(value: str) -> str:
     return value
 
 
+def _normalize_label_direction(value: Any, fallback: str) -> str:
+    # Canonicalize label direction tokens so generated C# always emits valid placement values.
+
+    raw = _normalize_export_string(str(value)).strip().lower()
+    if raw in {"top", "bottom", "left", "right"}:
+        return raw.capitalize()
+    return fallback
+
+
 def _normalize_component_definitions(value: Any) -> dict[str, dict[str, Any]]:
     # Normalize component definitions from project payload for export method generation.
 
@@ -822,7 +833,14 @@ def _build_component_node_initializer_lines(
     border_color = _escape_csharp_string(str(node.get("border_color", "")))
     layout = _layout_token(str(node.get("layout", "Vertical")))
     child_alignment = _text_anchor_token(str(node.get("child_alignment", "UpperLeft")))
-    props_json = _escape_csharp_string(json.dumps(node.get("props", {}), separators=(",", ":"), ensure_ascii=True))
+    props_value = node.get("props", {}) if isinstance(node.get("props", {}), dict) else {}
+    props_json = _escape_csharp_string(json.dumps(props_value, separators=(",", ":"), ensure_ascii=True))
+    raw_text = _normalize_export_string(str(node.get("text", "")))
+    label_direction_raw = props_value.get("label_direction", props_value.get("labelDirection", "Top"))
+    toggle_default_direction = "Left" if node_type_enum == "ToggleWithLabel" else "Top"
+    label_direction = _normalize_label_direction(label_direction_raw, toggle_default_direction)
+    label_text_raw = _normalize_export_string(str(props_value.get("label_text", raw_text)))
+    control_text_raw = _normalize_export_string(str(props_value.get("control_text", raw_text)))
 
     x = _as_int(node.get("x", 0), "x")
     y = _as_int(node.get("y", 0), "y")
@@ -876,6 +894,12 @@ def _build_component_node_initializer_lines(
 
     if scroll_vertical != "false" or scroll_horizontal != "false":
         lines.append(f"{child_pad}.Scroll({scroll_vertical}, {scroll_horizontal})")
+    if node_type_enum in {"ButtonWithLabel", "InputWithLabel", "ToggleWithLabel"}:
+        direction_literal = _escape_csharp_string(label_direction)
+        lines.append(f'{child_pad}.LabelPlacement("{direction_literal}")')
+        label_literal = _escape_csharp_string(label_text_raw)
+        control_literal = _escape_csharp_string(control_text_raw)
+        lines.append(f'{child_pad}.LabeledTexts("{label_literal}", "{control_literal}")')
     if props_json != "{}":
         lines.append(f'{child_pad}.Props("{props_json}")')
 

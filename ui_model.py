@@ -505,6 +505,157 @@ class UIDocument:
 
         return updated
 
+    def sync_component_structure_from_node(self, source_node_id: str) -> int:
+        # Rebuild one component template from an edited instance root and mirror structure to peer roots.
+
+        if source_node_id not in self.elements:
+            return 0
+
+        source_metadata = self._extract_component_metadata(self.elements[source_node_id])
+        if source_metadata is None:
+            return 0
+
+        component_id, source_instance_root_id, _node_path = source_metadata
+        if component_id not in self.components or source_instance_root_id not in self.elements:
+            return 0
+
+        template = self._strip_component_ids(self._serialize_node_tree(source_instance_root_id))
+        self.components[component_id].template = template
+
+        def annotate_instance(node_id: str, instance_root_id: str, path: str) -> None:
+            if node_id not in self.elements:
+                return
+
+            node = self.elements[node_id]
+            self._set_component_metadata(node, component_id, instance_root_id, path)
+            for index, child_id in enumerate(node.children):
+                child_path = str(index) if path == "" else f"{path}/{index}"
+                annotate_instance(child_id, instance_root_id, child_path)
+
+        annotate_instance(source_instance_root_id, source_instance_root_id, "")
+
+        def delete_subtree(node_id: str) -> None:
+            if node_id not in self.elements:
+                return
+
+            children = list(self.elements[node_id].children)
+            for child_id in children:
+                delete_subtree(child_id)
+
+            self.component_instances.pop(node_id, None)
+            del self.elements[node_id]
+
+        def apply_template(node_id: str, template_node: dict, instance_root_id: str, path: str) -> None:
+            if node_id not in self.elements:
+                raise ValueError("Component sync target node does not exist.")
+
+            element_type = str(template_node.get("type", ""))
+            if element_type == "":
+                raise ValueError("Component template node is missing type.")
+
+            node = self.elements[node_id]
+            legacy_padding = int(template_node.get("padding", 12))
+            node.element_type = element_type
+            node.name = str(template_node.get("name", element_type))
+            node.x = int(template_node.get("x", 0))
+            node.y = int(template_node.get("y", 0))
+            node.width = max(SAFE_MIN_SIZE, min(SAFE_MAX_SIZE, int(template_node.get("width", 220))))
+            node.height = max(SAFE_MIN_SIZE, min(SAFE_MAX_SIZE, int(template_node.get("height", 70))))
+            node.text = str(template_node.get("text", ""))
+            node.text_alignment = str(template_node.get("text_alignment", "Left"))
+            node.text_color_override = bool(template_node.get("text_color_override", False))
+            node.text_color = str(template_node.get("text_color", "#ffffff"))
+            node.background_color_override = bool(template_node.get("background_color_override", False))
+            node.background_color = str(template_node.get("background_color", ""))
+            node.multiline = bool(template_node.get("multiline", False))
+            node.border_color = str(template_node.get("border_color", ""))
+            node.layout = str(template_node.get("layout", "Vertical"))
+            node.child_alignment = str(template_node.get("child_alignment", "UpperLeft"))
+            node.spacing = max(SAFE_MIN_SPACING, min(SAFE_MAX_SPACING, int(template_node.get("spacing", 12))))
+            node.padding_left = max(SAFE_MIN_PADDING, min(SAFE_MAX_PADDING, int(template_node.get("padding_left", legacy_padding))))
+            node.padding_right = max(SAFE_MIN_PADDING, min(SAFE_MAX_PADDING, int(template_node.get("padding_right", legacy_padding))))
+            node.padding_top = max(SAFE_MIN_PADDING, min(SAFE_MAX_PADDING, int(template_node.get("padding_top", legacy_padding))))
+            node.padding_bottom = max(SAFE_MIN_PADDING, min(SAFE_MAX_PADDING, int(template_node.get("padding_bottom", legacy_padding))))
+            node.width_mode = normalize_size_mode(
+                template_node.get("width_mode", legacy_full_flag_to_size_mode(template_node.get("full_width", True))),
+                "width",
+            )
+            node.height_mode = normalize_size_mode(
+                template_node.get("height_mode", legacy_full_flag_to_size_mode(template_node.get("full_height", False))),
+                "height",
+            )
+            node.scroll_vertical = bool(template_node.get("scroll_vertical", False))
+            node.scroll_horizontal = bool(template_node.get("scroll_horizontal", False))
+
+            props: dict[str, object] = {}
+            props_value = template_node.get("props", {})
+            if isinstance(props_value, dict):
+                for key, value in props_value.items():
+                    if isinstance(key, str) and key.startswith("__component_"):
+                        continue
+                    props[str(key)] = value
+            node.props = props
+            self._set_component_metadata(node, component_id, instance_root_id, path)
+
+            template_children_raw = template_node.get("children", [])
+            template_children: list[dict] = []
+            if isinstance(template_children_raw, list):
+                for item in template_children_raw:
+                    if isinstance(item, dict):
+                        template_children.append(item)
+
+            existing_children = list(node.children)
+            shared_count = min(len(existing_children), len(template_children))
+            next_children: list[str] = []
+            for index in range(shared_count):
+                child_path = str(index) if path == "" else f"{path}/{index}"
+                child_id = existing_children[index]
+                apply_template(child_id, template_children[index], instance_root_id, child_path)
+                next_children.append(child_id)
+
+            for index in range(shared_count, len(existing_children)):
+                delete_subtree(existing_children[index])
+
+            for index in range(shared_count, len(template_children)):
+                child_path = str(index) if path == "" else f"{path}/{index}"
+                child_id = self._clone_payload_into_document(template_children[index], component_id, instance_root_id, child_path)
+                next_children.append(child_id)
+
+            node.children = next_children
+
+        updated_roots = 0
+        for instance_root_id in self.get_component_instance_roots(component_id):
+            if instance_root_id == source_instance_root_id:
+                continue
+            if instance_root_id not in self.elements:
+                continue
+
+            apply_template(instance_root_id, template, instance_root_id, "")
+            self.component_instances[instance_root_id] = component_id
+            updated_roots += 1
+
+        self._clear_stale_component_metadata()
+        return updated_roots
+
+    def _clear_stale_component_metadata(self) -> None:
+        # Remove component metadata from nodes that are no longer inside their declared instance roots.
+
+        instance_members: dict[str, set[str]] = {}
+        for instance_root_id, component_id in self.component_instances.items():
+            if component_id not in self.components or instance_root_id not in self.elements:
+                continue
+            instance_members[instance_root_id] = set(self._collect_subtree_ids(instance_root_id))
+
+        for node in self.elements.values():
+            metadata = self._extract_component_metadata(node)
+            if metadata is None:
+                continue
+
+            component_id, instance_root_id, _path = metadata
+            members = instance_members.get(instance_root_id)
+            if members is None or node.id not in members or component_id not in self.components:
+                self._clear_component_metadata(node)
+
     def add_element(self, element_type: str, parent_id: Optional[str]) -> UIElement:
         # Create and attach an element under a valid parent or the root scene.
 
@@ -908,12 +1059,15 @@ class UIDocument:
         self._prune_unreferenced_components()
 
     def _prune_unreferenced_components(self) -> None:
-        # Drop component definitions with no live instance roots.
+        # Keep component definitions even when uninstanced; only clean invalid instance bindings.
 
-        referenced = set(self.component_instances.values())
-        stale = [component_id for component_id in self.components if component_id not in referenced]
-        for component_id in stale:
-            self.components.pop(component_id, None)
+        stale_root_ids = [
+            root_id
+            for root_id, component_id in self.component_instances.items()
+            if root_id not in self.elements or component_id not in self.components
+        ]
+        for root_id in stale_root_ids:
+            self.component_instances.pop(root_id, None)
 
     def save_to_file(self, file_path: Path) -> None:
         # Serialize document to JSON file and track path for future saves.
